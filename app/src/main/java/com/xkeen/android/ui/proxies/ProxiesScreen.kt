@@ -133,6 +133,10 @@ fun ProxiesScreen(sshClient: SshClient?) {
                                             if (!test.ok) { actionMessage = "Config test failed"; return@launch }
                                             cmds.restartXkeen()
                                             actionMessage = "${proxy.tag} удалён"
+                                            // Remove from local list immediately, keep statuses for remaining
+                                            proxies = proxies.filter { it.tag != proxy.tag }
+                                            // Delayed refresh to let observatory collect data
+                                            kotlinx.coroutines.delay(3000)
                                             refresh()
                                         } catch (e: Exception) { actionMessage = e.message }
                                         finally { loading = false }
@@ -261,6 +265,8 @@ fun ProxiesScreen(sshClient: SshClient?) {
                         actionMessage = "Перезапускаю xray..."
                         cmds.restartXkeen()
                         actionMessage = "Добавлен $newTag"
+                        // Delayed refresh to let observatory collect data
+                        kotlinx.coroutines.delay(3000)
                         refresh()
                     } catch (e: Exception) { actionMessage = e.message }
                     finally { loading = false }
