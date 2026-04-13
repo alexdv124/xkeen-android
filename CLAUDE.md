@@ -58,6 +58,36 @@ Port 61219 is the xkeen standard. Two inbounds: redirect (TCP) + tproxy (UDP), b
 ### Aqara IoT workaround
 ТСПУ (Russian DPI) blocks direct traffic to Kingsoft Cloud (Aqara's backend). IPs `107.155.52.0/23` and `169.197.117.0/24` must be routed through proxy BEFORE the geoip:ru→direct rule (since these IPs are in Russia).
 
+### Initial setup wizard (fresh xkeen install)
+`XrayConfigRemote.initialSetup()` generates configs from scratch:
+- `01_log.json` — enables logging (access + error, level warning). Default xkeen install has logging disabled, but the app needs logs for observatory and diagnostics.
+- `03_inbounds.json` — standard redirect (TCP) + tproxy (UDP) on port 61219
+- `04_outbounds.json` — parsed from VLESS links + direct + block
+- `05_routing.json` — standard preset with QUIC block, geosite/geoip RU → direct, catch-all → proxy/balancer
+- `07_observatory.json` — burstObservatory with leastping (only if 2+ servers)
+- Files 02_dns.json and 06_policy.json are NOT touched — xkeen creates them during installation.
+
+### Auto-failover setup
+When user adds 2nd proxy to a single-server config (no balancer), `ProxiesScreen` shows a dialog offering to enable failover. `XrayConfigRemote.enableFailover()` creates the balancer, observatory, and updates routing's catch-all rule from `outboundTag` to `balancerTag`.
+
+### Diagnostics
+`RouterCommands.runDiagnostics()` checks: xray process, config test, proxy health (from actual outbounds config, not just logs), DNS resolution, DNS hijacking detection (Instagram CDN → known Russian ISP ranges = DPI), internet connectivity, geosite/geoip file count.
+
+### Bugs fixed (v0.0.4)
+- `SshClient.exec()`: replaced `session!!` with safe access; `Thread.sleep(100)` polling loop → `delay(100)` (was blocking IO thread)
+- `RouterCommands`: `now!!` NPE on date parse → safe fallback; `Thread.sleep(4000)` → `delay(4000)`
+- `VlessParser.parse()`: added validation for missing `@`, missing `:port`, non-numeric port; fixed double-escaped regex `\\.` → `\.`
+- `XrayConfigRemote.getRoutingMode()`: `!!.jsonPrimitive` → safe access with fallback
+- `ProxiesScreen`: `outbound["tag"]!!` → safe access; bulk import was concurrent (race condition on config files) → now sequential
+- `MainActivity`: `activeProfile!!.alias` → smart cast
+
+### ps output format (busybox on Keenetic)
+```
+PID   USER     VSZ   STAT  COMMAND
+10627 root     1330m S     xray run
+```
+Indices: [0]=PID, [1]=user, [2]=memory(VSZ), [3]=state, [4+]=command. Memory is at index 2, NOT 3.
+
 ## Building
 ```bash
 bash setup-build.sh   # Downloads JDK 17 + Android SDK (~1.5 GB)
