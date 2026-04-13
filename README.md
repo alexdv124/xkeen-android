@@ -6,6 +6,12 @@
 
 ## [Скачать APK](https://github.com/alexdv124/xkeen-android/releases/latest)
 
+## Перед началом
+
+1. Установите [xkeen](https://github.com/Corvus-Malus/XKeen) на роутер Keenetic по [инструкции](https://github.com/Corvus-Malus/XKeen)
+2. Настройте DNS-over-TLS (DoT) или DNS-over-HTTPS (DoH) в веб-интерфейсе Keenetic — без этого провайдер может подменять DNS-ответы через DPI, что приведёт к проблемам с заблокированными сервисами (например, не будут грузиться картинки в Instagram)
+3. Запустите приложение, добавьте роутер (IP, логин, пароль SSH) и вставьте VLESS-ссылки — встроенный мастер настройки сделает остальное
+
 ## Возможности
 
 ### Управление серверами
