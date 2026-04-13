@@ -74,6 +74,12 @@ fun ProxiesScreen(sshClient: SshClient?) {
             }
         } else {
             Box(Modifier.fillMaxSize().padding(padding)) {
+                // Global progress indicator
+                if (loading) {
+                    LinearProgressIndicator(
+                        Modifier.fillMaxWidth().align(Alignment.TopCenter).padding(horizontal = 16.dp)
+                    )
+                }
                 if (loading && proxies.isEmpty()) {
                     CircularProgressIndicator(Modifier.align(Alignment.Center))
                 } else {
@@ -226,6 +232,7 @@ fun ProxiesScreen(sshClient: SshClient?) {
                             actionMessage = "No tag in outbound"; return@launch
                         }
 
+                        actionMessage = "Добавляю $newTag..."
                         val (ok, msg) = config.addOutbound(outbound)
                         if (!ok) { actionMessage = msg; return@launch }
 
@@ -244,12 +251,14 @@ fun ProxiesScreen(sshClient: SshClient?) {
                             config.addToBalancer(newTag)
                         }
 
+                        actionMessage = "Тестирую конфиг..."
                         val test = cmds.testConfig()
                         if (!test.ok) {
                             config.removeOutbound(newTag)
                             actionMessage = "Config test failed: ${test.output.takeLast(200)}"
                             return@launch
                         }
+                        actionMessage = "Перезапускаю xray..."
                         cmds.restartXkeen()
                         actionMessage = "Добавлен $newTag"
                         refresh()

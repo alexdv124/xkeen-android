@@ -184,7 +184,22 @@ fun RoutingScreen(sshClient: SshClient?) {
                         )
                         FilterChip(
                             selected = routingConfig.mode is RoutingMode.Manual,
-                            onClick = { },
+                            onClick = {
+                                // Switch to manual — pick first proxy as default
+                                val firstProxy = proxies.firstOrNull() ?: return@FilterChip
+                                scope.launch {
+                                    loading = true
+                                    try {
+                                        val config = XrayConfigRemote(sshClient)
+                                        val cmds = RouterCommands(sshClient)
+                                        config.setRoutingMode(RoutingMode.Manual(firstProxy.tag))
+                                        val test = cmds.testConfig()
+                                        if (test.ok) { cmds.restartXkeen(); message = "Ручной режим: ${firstProxy.tag}"; refresh() }
+                                        else { config.setRoutingMode(RoutingMode.Auto); message = "Test failed" }
+                                    } catch (e: Exception) { message = e.message }
+                                    finally { loading = false }
+                                }
+                            },
                             label = { Text("Ручной") },
                             leadingIcon = { Icon(Icons.Default.TouchApp, null, Modifier.size(16.dp)) }
                         )
