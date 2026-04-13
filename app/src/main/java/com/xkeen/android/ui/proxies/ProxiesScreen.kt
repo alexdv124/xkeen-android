@@ -222,7 +222,9 @@ fun ProxiesScreen(sshClient: SshClient?) {
                         }
                         val config = XrayConfigRemote(sshClient)
                         val cmds = RouterCommands(sshClient)
-                        val newTag = outbound["tag"]!!.jsonPrimitive.content
+                        val newTag = outbound["tag"]?.jsonPrimitive?.content ?: run {
+                            actionMessage = "No tag in outbound"; return@launch
+                        }
 
                         val (ok, msg) = config.addOutbound(outbound)
                         if (!ok) { actionMessage = msg; return@launch }
@@ -357,11 +359,9 @@ fun AddProxySheet(onDismiss: () -> Unit, onDeploy: (String, String) -> Unit) {
             Spacer(Modifier.height(16.dp))
             Button(
                 onClick = {
-                    if (isBulk) {
-                        // Deploy all links one by one
-                        links.forEach { link -> onDeploy(link.trim(), "") }
-                    } else {
-                        onDeploy(links.firstOrNull()?.trim() ?: vlessLinks.trim(), customTag)
+                    // Deploy links sequentially (first triggers failover dialog if needed)
+                    links.forEachIndexed { i, link ->
+                        onDeploy(link.trim(), if (!isBulk) customTag else "")
                     }
                 },
                 modifier = Modifier.fillMaxWidth(),

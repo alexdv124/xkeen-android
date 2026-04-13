@@ -2,6 +2,7 @@ package com.xkeen.android.data.remote
 
 import com.xkeen.android.data.ssh.SshClient
 import com.xkeen.android.domain.model.ConfigTestResult
+import kotlinx.coroutines.delay
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -93,8 +94,8 @@ class RouterCommands(private val ssh: SshClient) {
         // Router time
         val nowOut = ssh.exec("date +%Y/%m/%d\\ %H:%M:%S").stdout.trim()
         val sdf = SimpleDateFormat("yyyy/MM/dd HH:mm:ss", Locale.US)
-        val now = try { sdf.parse(nowOut) } catch (_: Exception) { Date() }
-        val cutoff = Date(now!!.time - 5 * 60 * 1000)
+        val now = try { sdf.parse(nowOut) } catch (_: Exception) { null } ?: Date()
+        val cutoff = Date(now.time - 5 * 60 * 1000)
 
         // Failed proxies
         val failed = mutableSetOf<String>()
@@ -156,7 +157,7 @@ class RouterCommands(private val ssh: SshClient) {
             ssh.exec("/opt/etc/init.d/S99xkeen restart 2>&1", timeout = 30000)
         } catch (_: Exception) { }
 
-        Thread.sleep(4000)
+        delay(4000)
         val out = ssh.exec("ps | grep xray | grep -v grep").stdout.trim()
         return Pair(out.isNotEmpty(), out)
     }

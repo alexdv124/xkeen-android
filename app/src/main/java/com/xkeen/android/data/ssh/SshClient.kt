@@ -5,6 +5,7 @@ import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
 import com.xkeen.android.domain.model.RouterProfile
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -40,7 +41,8 @@ class SshClient(private val profile: RouterProfile) {
     suspend fun exec(cmd: String, timeout: Int = 15000): SshResult = mutex.withLock {
         withContext(Dispatchers.IO) {
             connect()
-            val channel = session!!.openChannel("exec") as ChannelExec
+            val currentSession = session ?: throw IllegalStateException("SSH not connected")
+            val channel = currentSession.openChannel("exec") as ChannelExec
             channel.setCommand(cmd)
             channel.inputStream = null
 
@@ -53,7 +55,7 @@ class SshClient(private val profile: RouterProfile) {
 
             val startTime = System.currentTimeMillis()
             while (!channel.isClosed && System.currentTimeMillis() - startTime < timeout) {
-                Thread.sleep(100)
+                delay(100)
             }
 
             val out = stdout.toString(Charsets.UTF_8.name())

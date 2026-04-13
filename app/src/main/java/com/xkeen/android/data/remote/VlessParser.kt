@@ -20,14 +20,20 @@ class VlessParser {
             body = body.substring(0, idx)
         }
 
-        val (uuid, remainder) = body.split("@", limit = 2)
+        val atParts = body.split("@", limit = 2)
+        if (atParts.size < 2) throw IllegalArgumentException("Invalid VLESS link: missing @")
+        val uuid = atParts[0]
+        val remainder = atParts[1]
+
         val qIdx = remainder.indexOf('?')
         val hostPort = if (qIdx >= 0) remainder.substring(0, qIdx) else remainder
         val queryString = if (qIdx >= 0) remainder.substring(qIdx + 1) else ""
 
         val lastColon = hostPort.lastIndexOf(':')
+        if (lastColon <= 0) throw IllegalArgumentException("Invalid VLESS link: missing port")
         val address = hostPort.substring(0, lastColon)
-        val port = hostPort.substring(lastColon + 1).toInt()
+        val port = hostPort.substring(lastColon + 1).toIntOrNull()
+            ?: throw IllegalArgumentException("Invalid port")
 
         val params = parseQueryString(queryString)
         val transport = params["type"] ?: "tcp"
@@ -51,7 +57,7 @@ class VlessParser {
     }
 
     private fun generateTag(name: String, address: String): String {
-        val hostMatch = Regex("""\\.?([a-z]{2}\d+)\\.""").find(address)
+        val hostMatch = Regex("""\.?([a-z]{2}\d+)\.""").find(address)
         if (hostMatch != null) return "proxy-${hostMatch.groupValues[1]}"
 
         val nameMatch = Regex("""([A-Z]{2})\s*#?\s*(\d+)""").find(name)

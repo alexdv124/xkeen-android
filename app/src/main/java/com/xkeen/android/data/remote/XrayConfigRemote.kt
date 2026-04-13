@@ -108,7 +108,7 @@ class XrayConfigRemote(private val ssh: SshClient) {
         return when {
             lastRule.containsKey("balancerTag") -> RoutingMode.Auto
             lastRule["outboundTag"]?.jsonPrimitive?.content?.startsWith("proxy-") == true ->
-                RoutingMode.Manual(lastRule["outboundTag"]!!.jsonPrimitive.content)
+                RoutingMode.Manual(lastRule["outboundTag"]?.jsonPrimitive?.content ?: "proxy-unknown")
             else -> RoutingMode.Auto
         }
     }

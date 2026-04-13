@@ -133,9 +133,10 @@ fun MainApp(database: AppDatabase) {
                 title = {
                     Column {
                         Text("XKeen", fontWeight = FontWeight.Bold)
-                        if (activeProfile != null) {
+                        val profile = activeProfile
+                        if (profile != null) {
                             Text(
-                                activeProfile!!.alias + if (connectionStatus.isNotEmpty()) " · $connectionStatus" else "",
+                                profile.alias + if (connectionStatus.isNotEmpty()) " · $connectionStatus" else "",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
