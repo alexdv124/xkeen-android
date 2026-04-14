@@ -27,6 +27,7 @@ fun RoutingScreen(sshClient: SshClient?) {
     var message by remember { mutableStateOf<String?>(null) }
     var showCustomRouteDialog by remember { mutableStateOf(false) }
     var showAqaraDialog by remember { mutableStateOf(false) }
+    var deviceToRoute by remember { mutableStateOf<com.xkeen.android.data.remote.NetworkDevice?>(null) }
 
     fun refresh() {
         if (sshClient == null) return
@@ -313,7 +314,9 @@ fun RoutingScreen(sshClient: SshClient?) {
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
-                                if (route.target == "proxy") Icons.Default.VpnKey else Icons.Default.Public,
+                                if (route.routeType == "source") Icons.Default.Devices
+                                else if (route.target == "proxy") Icons.Default.VpnKey
+                                else Icons.Default.Public,
                                 null, Modifier.size(20.dp),
                                 tint = if (route.target == "proxy") MaterialTheme.colorScheme.primary
                                 else MaterialTheme.colorScheme.secondary
@@ -321,8 +324,10 @@ fun RoutingScreen(sshClient: SshClient?) {
                             Spacer(Modifier.width(12.dp))
                             Column(Modifier.weight(1f)) {
                                 Text(route.value, fontWeight = FontWeight.Medium)
-                                if (route.comment.isNotEmpty()) {
-                                    Text(route.comment, style = MaterialTheme.typography.bodySmall,
+                                val label = if (route.routeType == "source") "Устройство → весь трафик"
+                                    else route.comment
+                                if (label.isNotEmpty()) {
+                                    Text(label, style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                             }
@@ -400,23 +405,46 @@ fun RoutingScreen(sshClient: SshClient?) {
             Card(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(12.dp)) {
                     devices.forEach { dev ->
-                        val alreadyRouted = routingConfig.customRoutes.any { it.value.startsWith(dev.ip) }
-                        Row(
-                            Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                        val existingRoute = routingConfig.customRoutes.find {
+                            it.routeType == "source" && it.value == dev.ip
+                        }
+                        Surface(
+                            onClick = {
+                                if (existingRoute == null) deviceToRoute = dev
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            color = MaterialTheme.colorScheme.surface
                         ) {
-                            Icon(Icons.Default.Devices, null, Modifier.size(16.dp),
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                            Spacer(Modifier.width(8.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(dev.ip, style = MaterialTheme.typography.bodyMedium)
-                                Text("${dev.mac} · ${dev.iface}",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
-                            if (alreadyRouted) {
-                                Text("маршрут задан", style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.primary)
+                            Row(
+                                Modifier.fillMaxWidth().padding(vertical = 8.dp, horizontal = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.Devices, null, Modifier.size(16.dp),
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Spacer(Modifier.width(8.dp))
+                                Column(Modifier.weight(1f)) {
+                                    Text(dev.ip, style = MaterialTheme.typography.bodyMedium)
+                                    Text("${dev.mac} · ${dev.iface}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                if (existingRoute != null) {
+                                    Surface(
+                                        shape = MaterialTheme.shapes.small,
+                                        color = if (existingRoute.target == "proxy") MaterialTheme.colorScheme.primaryContainer
+                                        else MaterialTheme.colorScheme.secondaryContainer
+                                    ) {
+                                        Text(
+                                            if (existingRoute.target == "proxy") "VPN" else "DIRECT",
+                                            Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                                            style = MaterialTheme.typography.labelSmall
+                                        )
+                                    }
+                                } else {
+                                    Icon(Icons.Default.AddCircleOutline, "Добавить маршрут",
+                                        Modifier.size(20.dp),
+                                        tint = MaterialTheme.colorScheme.primary)
+                                }
                             }
                         }
                     }
@@ -549,6 +577,65 @@ fun RoutingScreen(sshClient: SshClient?) {
                 }) { Text("Добавить") }
             },
             dismissButton = { TextButton(onClick = { showAqaraDialog = false }) { Text("Отмена") } }
+        )
+    }
+
+    deviceToRoute?.let { dev ->
+        var selectedTarget by remember { mutableStateOf("proxy") }
+        AlertDialog(
+            onDismissRequest = { deviceToRoute = null },
+            icon = { Icon(Icons.Default.Devices, null) },
+            title = { Text("Маршрут для устройства") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Весь интернет-трафик от ${dev.ip} будет направлен через выбранный канал.")
+                    Text("MAC: ${dev.mac}", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(4.dp))
+                    Text("Направление:", fontWeight = FontWeight.Medium)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(
+                            selected = selectedTarget == "proxy",
+                            onClick = { selectedTarget = "proxy" },
+                            label = { Text("Через VPN") },
+                            leadingIcon = { Icon(Icons.Default.VpnKey, null, Modifier.size(16.dp)) }
+                        )
+                        FilterChip(
+                            selected = selectedTarget == "direct",
+                            onClick = { selectedTarget = "direct" },
+                            label = { Text("Напрямую") },
+                            leadingIcon = { Icon(Icons.Default.Public, null, Modifier.size(16.dp)) }
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(onClick = {
+                    val route = CustomRoute(
+                        value = dev.ip,
+                        target = selectedTarget,
+                        comment = "Устройство (${dev.mac})",
+                        routeType = "source"
+                    )
+                    deviceToRoute = null
+                    val newRoutes = routingConfig.customRoutes + route
+                    scope.launch {
+                        loading = true
+                        try {
+                            val config = XrayConfigRemote(sshClient)
+                            val cmds = RouterCommands(sshClient)
+                            config.applyPreset(routingConfig.preset, newRoutes)
+                            if (cmds.testConfig().ok) {
+                                cmds.restartXkeen()
+                                message = "Маршрут добавлен: ${dev.ip} → ${if (selectedTarget == "proxy") "VPN" else "напрямую"}"
+                                refresh()
+                            } else { message = "Config test failed" }
+                        } catch (e: Exception) { message = e.message }
+                        finally { loading = false }
+                    }
+                }) { Text("Добавить") }
+            },
+            dismissButton = { TextButton(onClick = { deviceToRoute = null }) { Text("Отмена") } }
         )
     }
 }

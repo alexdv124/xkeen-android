@@ -74,7 +74,8 @@ enum class RoutingPreset(val title: String, val description: String) {
 data class CustomRoute(
     val value: String,       // IP (107.155.52.0/23) or domain (example.com)
     val target: String,      // "proxy" or "direct"
-    val comment: String = "" // e.g. "Aqara Cloud"
+    val comment: String = "", // e.g. "Aqara Cloud"
+    val routeType: String = "ip" // "ip" = destination-based, "source" = source-based (for LAN devices)
 )
 
 data class RoutingConfig(

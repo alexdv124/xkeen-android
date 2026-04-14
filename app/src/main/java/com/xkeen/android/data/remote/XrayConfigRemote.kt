@@ -366,17 +366,25 @@ class XrayConfigRemote(private val ssh: SshClient) {
         val customRoutes = mutableListOf<CustomRoute>()
         for (rule in rules) {
             val obj = rule.jsonObject
-            val ips = obj["ip"]?.jsonArray
             val target = obj["outboundTag"]?.jsonPrimitive?.content
                 ?: if (obj.containsKey("balancerTag")) "proxy" else continue
-            // Custom IP routes (not geoip, not standard private ranges)
+            val routeTarget = if (target == "direct") "direct" else "proxy"
+
+            // Source-based routes (LAN device IPs)
+            val sources = obj["source"]?.jsonArray
+            sources?.forEach { srcEl ->
+                val src = srcEl.jsonPrimitive.content
+                customRoutes.add(CustomRoute(src, routeTarget, "Устройство", routeType = "source"))
+            }
+
+            // Destination IP routes (not geoip, not standard private ranges)
+            val ips = obj["ip"]?.jsonArray
             ips?.forEach { ipEl ->
                 val ip = ipEl.jsonPrimitive.content
                 if (!ip.startsWith("ext:") && !ip.startsWith("geoip") &&
                     ip != "0.0.0.0/8" && !ip.startsWith("10.") && !ip.startsWith("127.") &&
                     !ip.startsWith("172.16.") && !ip.startsWith("192.168.") &&
                     !ip.startsWith("169.254.") && !ip.startsWith("224.") && ip != "255.255.255.255/32") {
-                    val routeTarget = if (target == "direct") "direct" else "proxy"
                     val comment = when {
                         ip.startsWith("107.155.52") || ip.startsWith("107.155.53") -> "Aqara Cloud (CDN)"
                         ip.startsWith("169.197.117") -> "Aqara Cloud (MQTT)"
@@ -663,8 +671,39 @@ class XrayConfigRemote(private val ssh: SshClient) {
             put("port", "135,137,138,139,443")
         })
 
-        // 2. Custom routes that go through PROXY (before RU rules)
-        val proxyCustomIps = customRoutes.filter { it.target == "proxy" }
+        // 2. Source-based routes (LAN devices → proxy/direct)
+        val sourceProxyRoutes = customRoutes.filter { it.routeType == "source" && it.target == "proxy" }
+        if (sourceProxyRoutes.isNotEmpty()) {
+            val hasBalancer = routing["balancers"]?.jsonArray?.any {
+                it.jsonObject["tag"]?.jsonPrimitive?.content == "proxy-balancer"
+            } ?: false
+            rules.add(buildJsonObject {
+                put("type", "field")
+                put("inboundTag", inboundTags)
+                putJsonArray("source") {
+                    sourceProxyRoutes.forEach { add(JsonPrimitive(it.value)) }
+                }
+                if (hasBalancer) put("balancerTag", "proxy-balancer")
+                else {
+                    val firstProxy = getProxyList().firstOrNull()?.tag ?: "direct"
+                    put("outboundTag", firstProxy)
+                }
+            })
+        }
+        val sourceDirectRoutes = customRoutes.filter { it.routeType == "source" && it.target == "direct" }
+        if (sourceDirectRoutes.isNotEmpty()) {
+            rules.add(buildJsonObject {
+                put("type", "field")
+                put("inboundTag", inboundTags)
+                putJsonArray("source") {
+                    sourceDirectRoutes.forEach { add(JsonPrimitive(it.value)) }
+                }
+                put("outboundTag", "direct")
+            })
+        }
+
+        // 3. Custom destination routes that go through PROXY (before RU rules)
+        val proxyCustomIps = customRoutes.filter { it.routeType == "ip" && it.target == "proxy" }
         if (proxyCustomIps.isNotEmpty()) {
             rules.add(buildJsonObject {
                 put("type", "field")
@@ -676,7 +715,7 @@ class XrayConfigRemote(private val ssh: SshClient) {
             })
         }
 
-        // 3. Preset-specific rules
+        // 4. Preset-specific rules
         when (preset) {
             RoutingPreset.RU_DIRECT -> {
                 // RU domains → direct
@@ -725,8 +764,8 @@ class XrayConfigRemote(private val ssh: SshClient) {
             }
         }
 
-        // 4. Custom routes that go DIRECT
-        val directCustomIps = customRoutes.filter { it.target == "direct" }
+        // 5. Custom destination routes that go DIRECT
+        val directCustomIps = customRoutes.filter { it.routeType == "ip" && it.target == "direct" }
         if (directCustomIps.isNotEmpty() && preset != RoutingPreset.ALL_DIRECT) {
             rules.add(buildJsonObject {
                 put("type", "field")
@@ -738,7 +777,7 @@ class XrayConfigRemote(private val ssh: SshClient) {
             })
         }
 
-        // 5. Catch-all rule
+        // 6. Catch-all rule
         val catchAll = when (preset) {
             RoutingPreset.ALL_DIRECT -> buildJsonObject {
                 put("type", "field")
