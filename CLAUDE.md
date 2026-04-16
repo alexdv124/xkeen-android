@@ -46,14 +46,24 @@ VLESS links from some providers contain `"hKeepAlivePeriod":0.0` — JSON float.
 
 ### Routing rule order matters
 1. UDP 135,137-139,443 → block (QUIC + NetBIOS)
-2. Custom proxy routes (e.g. Aqara IPs) — BEFORE geoip:ru
-3. RU domains (geosite) → direct
-4. RU IPs (geoip) → direct
-5. BitTorrent → direct
-6. Catch-all → balancer or specific proxy
+2. Source-based routes (LAN device IPs → proxy/direct)
+3. Custom IP routes → proxy (e.g. Aqara IPs) — BEFORE geoip:ru
+4. Custom domain routes → proxy (e.g. youtube.com) — BEFORE geosite:ru
+5. RU domains (geosite) → direct
+6. RU IPs (geoip) → direct
+7. BitTorrent → direct
+8. Custom IP routes → direct
+9. Custom domain routes → direct
+10. Catch-all → balancer or specific proxy
 
 ### Standard inbounds config (03_inbounds.json)
 Port 61219 is the xkeen standard. Two inbounds: redirect (TCP) + tproxy (UDP), both dokodemo-door with sniffing enabled.
+
+### Domain-based custom routing
+Users can add specific domains (e.g. `youtube.com`) and force them through VPN or direct. In `applyPreset()`, domain proxy routes use `"domain":["domain:example.com"]` and are placed BEFORE geosite:ru rules. Domain direct routes are placed BEFORE the catch-all rule. The `getRoutingConfig()` parser reads domain arrays back, filtering out preset domains (ext:geosite, domain:ru/su/рф) and stripping the `domain:` prefix. `AddCustomRouteDialog` defaults to domain mode and auto-cleans input (strips `https://`, paths, lowercased). `CustomRoute.routeType` = `"domain"` (alongside existing `"ip"` and `"source"`).
+
+### Source-based routing (LAN devices)
+Tapping a device in the network list (ARP scan) opens a dialog to route all its traffic through VPN or direct. Uses Xray's `"source"` field in routing rules, placed before geoip/geosite rules so device traffic is captured regardless of destination. `CustomRoute.routeType` = `"source"`.
 
 ### Aqara IoT workaround
 ТСПУ (Russian DPI) blocks direct traffic to Kingsoft Cloud (Aqara's backend). IPs `107.155.52.0/23` and `169.197.117.0/24` must be routed through proxy BEFORE the geoip:ru→direct rule (since these IPs are in Russia).
@@ -80,6 +90,12 @@ When user adds 2nd proxy to a single-server config (no balancer), `ProxiesScreen
 - `XrayConfigRemote.getRoutingMode()`: `!!.jsonPrimitive` → safe access with fallback
 - `ProxiesScreen`: `outbound["tag"]!!` → safe access; bulk import was concurrent (race condition on config files) → now sequential
 - `MainActivity`: `activeProfile!!.alias` → smart cast
+
+### Bugs fixed (v0.0.7+)
+- Manual routing mode chip now correctly switches to first proxy on click
+- Progress indicators added to all proxy/routing operations (no more frozen UI)
+- Proxy status no longer lost after add/delete — delayed refresh (3s) after xray restart
+- Custom IP proxy routes now check for balancer existence instead of hardcoding `balancerTag`
 
 ### ps output format (busybox on Keenetic)
 ```
