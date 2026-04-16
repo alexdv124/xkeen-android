@@ -393,6 +393,17 @@ class XrayConfigRemote(private val ssh: SshClient) {
                     customRoutes.add(CustomRoute(ip, routeTarget, comment))
                 }
             }
+
+            // Domain-based routes (not geosite presets, not standard TLDs)
+            val domains = obj["domain"]?.jsonArray
+            domains?.forEach { domEl ->
+                val dom = domEl.jsonPrimitive.content
+                if (!dom.startsWith("ext:") && !dom.startsWith("geosite") &&
+                    dom != "domain:ru" && dom != "domain:su" && dom != "domain:рф") {
+                    val cleanDomain = dom.removePrefix("domain:").removePrefix("full:")
+                    customRoutes.add(CustomRoute(cleanDomain, routeTarget, "", routeType = "domain"))
+                }
+            }
         }
 
         val quicBlocked = rules.any { rule ->
@@ -703,6 +714,10 @@ class XrayConfigRemote(private val ssh: SshClient) {
         }
 
         // 3. Custom destination routes that go through PROXY (before RU rules)
+        val hasBalancerForCustom = routing["balancers"]?.jsonArray?.any {
+            it.jsonObject["tag"]?.jsonPrimitive?.content == "proxy-balancer"
+        } ?: false
+
         val proxyCustomIps = customRoutes.filter { it.routeType == "ip" && it.target == "proxy" }
         if (proxyCustomIps.isNotEmpty()) {
             rules.add(buildJsonObject {
@@ -711,7 +726,28 @@ class XrayConfigRemote(private val ssh: SshClient) {
                 putJsonArray("ip") {
                     proxyCustomIps.forEach { add(JsonPrimitive(it.value)) }
                 }
-                put("balancerTag", "proxy-balancer")
+                if (hasBalancerForCustom) put("balancerTag", "proxy-balancer")
+                else {
+                    val firstProxy = getProxyList().firstOrNull()?.tag ?: "direct"
+                    put("outboundTag", firstProxy)
+                }
+            })
+        }
+
+        // 3b. Custom domain routes that go through PROXY (before RU rules)
+        val proxyCustomDomains = customRoutes.filter { it.routeType == "domain" && it.target == "proxy" }
+        if (proxyCustomDomains.isNotEmpty()) {
+            rules.add(buildJsonObject {
+                put("type", "field")
+                put("inboundTag", inboundTags)
+                putJsonArray("domain") {
+                    proxyCustomDomains.forEach { add(JsonPrimitive("domain:${it.value}")) }
+                }
+                if (hasBalancerForCustom) put("balancerTag", "proxy-balancer")
+                else {
+                    val firstProxy = getProxyList().firstOrNull()?.tag ?: "direct"
+                    put("outboundTag", firstProxy)
+                }
             })
         }
 
@@ -773,6 +809,19 @@ class XrayConfigRemote(private val ssh: SshClient) {
                 put("outboundTag", "direct")
                 putJsonArray("ip") {
                     directCustomIps.forEach { add(JsonPrimitive(it.value)) }
+                }
+            })
+        }
+
+        // 5b. Custom domain routes that go DIRECT
+        val directCustomDomains = customRoutes.filter { it.routeType == "domain" && it.target == "direct" }
+        if (directCustomDomains.isNotEmpty() && preset != RoutingPreset.ALL_DIRECT) {
+            rules.add(buildJsonObject {
+                put("type", "field")
+                put("inboundTag", inboundTags)
+                put("outboundTag", "direct")
+                putJsonArray("domain") {
+                    directCustomDomains.forEach { add(JsonPrimitive("domain:${it.value}")) }
                 }
             })
         }

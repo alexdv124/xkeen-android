@@ -298,7 +298,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
                 ) {
                     Text(
-                        "Нет особых маршрутов. Добавьте IP или подсеть для принудительного направления через VPN или напрямую",
+                        "Нет особых маршрутов. Добавьте домен или IP для принудительного направления через VPN или напрямую",
                         Modifier.padding(16.dp),
                         style = MaterialTheme.typography.bodySmall
                     )
@@ -314,9 +314,12 @@ fun RoutingScreen(sshClient: SshClient?) {
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
-                                if (route.routeType == "source") Icons.Default.Devices
-                                else if (route.target == "proxy") Icons.Default.VpnKey
-                                else Icons.Default.Public,
+                                when (route.routeType) {
+                                    "source" -> Icons.Default.Devices
+                                    "domain" -> Icons.Default.Language
+                                    else -> if (route.target == "proxy") Icons.Default.VpnKey
+                                            else Icons.Default.Public
+                                },
                                 null, Modifier.size(20.dp),
                                 tint = if (route.target == "proxy") MaterialTheme.colorScheme.primary
                                 else MaterialTheme.colorScheme.secondary
@@ -324,8 +327,12 @@ fun RoutingScreen(sshClient: SshClient?) {
                             Spacer(Modifier.width(12.dp))
                             Column(Modifier.weight(1f)) {
                                 Text(route.value, fontWeight = FontWeight.Medium)
-                                val label = if (route.routeType == "source") "Устройство → весь трафик"
-                                    else route.comment
+                                val label = when {
+                                    route.routeType == "source" -> "Устройство → весь трафик"
+                                    route.routeType == "domain" && route.comment.isNotEmpty() -> route.comment
+                                    route.routeType == "domain" -> "Домен"
+                                    else -> route.comment
+                                }
                                 if (label.isNotEmpty()) {
                                     Text(label, style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -674,19 +681,35 @@ fun PresetCard(title: String, description: String, icon: ImageVector, selected: 
 
 @Composable
 fun AddCustomRouteDialog(onDismiss: () -> Unit, onAdd: (CustomRoute) -> Unit) {
-    var ip by remember { mutableStateOf("") }
+    var value by remember { mutableStateOf("") }
     var comment by remember { mutableStateOf("") }
     var target by remember { mutableStateOf("proxy") }
+    var routeType by remember { mutableStateOf("domain") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Добавить маршрут") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Тип:", fontWeight = FontWeight.Medium)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = routeType == "domain",
+                        onClick = { routeType = "domain"; value = "" },
+                        label = { Text("Домен") },
+                        leadingIcon = { Icon(Icons.Default.Language, null, Modifier.size(16.dp)) }
+                    )
+                    FilterChip(
+                        selected = routeType == "ip",
+                        onClick = { routeType = "ip"; value = "" },
+                        label = { Text("IP / подсеть") },
+                        leadingIcon = { Icon(Icons.Default.Lan, null, Modifier.size(16.dp)) }
+                    )
+                }
                 OutlinedTextField(
-                    value = ip, onValueChange = { ip = it },
-                    label = { Text("IP / подсеть") },
-                    placeholder = { Text("1.2.3.0/24") },
+                    value = value, onValueChange = { value = it },
+                    label = { Text(if (routeType == "domain") "Домен" else "IP / подсеть") },
+                    placeholder = { Text(if (routeType == "domain") "youtube.com" else "1.2.3.0/24") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )
@@ -715,8 +738,17 @@ fun AddCustomRouteDialog(onDismiss: () -> Unit, onAdd: (CustomRoute) -> Unit) {
         },
         confirmButton = {
             Button(
-                onClick = { onAdd(CustomRoute(ip.trim(), target, comment.trim())) },
-                enabled = ip.isNotBlank()
+                onClick = {
+                    val cleaned = if (routeType == "domain") {
+                        value.trim()
+                            .removePrefix("https://").removePrefix("http://")
+                            .removeSuffix("/")
+                            .substringBefore("/")
+                            .lowercase()
+                    } else value.trim()
+                    onAdd(CustomRoute(cleaned, target, comment.trim(), routeType = routeType))
+                },
+                enabled = value.isNotBlank()
             ) { Text("Добавить") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Отмена") } }

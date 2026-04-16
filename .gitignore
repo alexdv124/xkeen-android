@@ -12,3 +12,5 @@
 *.jks
 *.keystore
 /android-build/
+/build-tools/
+.claude/
