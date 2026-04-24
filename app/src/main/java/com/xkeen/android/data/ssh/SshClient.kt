@@ -15,6 +15,7 @@ import java.util.Base64
 class SshClient(private val profile: RouterProfile) {
     private var session: Session? = null
     private val mutex = Mutex()
+    private val writeMutex = Mutex()
 
     private fun connect() {
         val s = session
@@ -70,16 +71,27 @@ class SshClient(private val profile: RouterProfile) {
         return exec("cat $path").stdout
     }
 
-    suspend fun writeFileB64(path: String, content: String) {
+    suspend fun writeFileB64(path: String, content: String) = writeMutex.withLock {
         val b64 = Base64.getEncoder().encodeToString(content.toByteArray(Charsets.UTF_8))
         val chunkSize = 4000
         val chunks = b64.chunked(chunkSize)
+        val tmpB64 = "/tmp/_panel_${System.nanoTime()}.b64"
+        val tmpOut = "$path.tmp"
 
-        exec("printf '%s' '${chunks[0]}' > /tmp/_panel.b64")
-        for (chunk in chunks.drop(1)) {
-            exec("printf '%s' '$chunk' >> /tmp/_panel.b64")
+        try {
+            exec("printf '%s' '${chunks[0]}' > $tmpB64")
+            for (chunk in chunks.drop(1)) {
+                exec("printf '%s' '$chunk' >> $tmpB64")
+            }
+            // Atomic write: decode to .tmp, only mv on success
+            val result = exec("base64 -d $tmpB64 > $tmpOut && mv $tmpOut $path && echo OK")
+            if (!result.stdout.contains("OK")) {
+                exec("rm -f $tmpOut")
+                throw IllegalStateException("writeFileB64 failed: ${result.stderr.take(200)}")
+            }
+        } finally {
+            exec("rm -f $tmpB64")
         }
-        exec("base64 -d /tmp/_panel.b64 > $path; rm /tmp/_panel.b64")
     }
 
     fun close() {

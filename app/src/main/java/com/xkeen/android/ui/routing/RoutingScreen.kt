@@ -281,12 +281,13 @@ fun RoutingScreen(sshClient: SshClient?) {
                     if (!hasAqara) {
                         AssistChip(
                             onClick = { showAqaraDialog = true },
+                            enabled = !loading,
                             label = { Text("Aqara") },
                             leadingIcon = { Icon(Icons.Default.Videocam, null, Modifier.size(16.dp)) }
                         )
                         Spacer(Modifier.width(4.dp))
                     }
-                    IconButton(onClick = { showCustomRouteDialog = true }) {
+                    IconButton(onClick = { showCustomRouteDialog = true }, enabled = !loading) {
                         Icon(Icons.Default.Add, "Добавить маршрут")
                     }
                 }
@@ -359,11 +360,13 @@ fun RoutingScreen(sshClient: SshClient?) {
                                             val cmds = RouterCommands(sshClient)
                                             config.applyPreset(routingConfig.preset, newRoutes)
                                             if (cmds.testConfig().ok) { cmds.restartXkeen(); refresh() }
+                                            else { message = "Тест конфига провалился" }
                                         } catch (e: Exception) { message = e.message }
                                         finally { loading = false }
                                     }
                                 },
-                                Modifier.size(32.dp)
+                                enabled = !loading,
+                                modifier = Modifier.size(32.dp)
                             ) {
                                 Icon(Icons.Default.Close, "Удалить", Modifier.size(16.dp))
                             }
