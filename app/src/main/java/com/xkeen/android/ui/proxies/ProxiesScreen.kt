@@ -129,6 +129,15 @@ fun ProxiesScreen(sshClient: SshClient?) {
                                             val cmds = RouterCommands(sshClient)
                                             val (ok, msg) = config.removeOutbound(proxy.tag)
                                             if (!ok) { actionMessage = msg; return@launch }
+                                            // Also drop the tag from balancer selector so it doesn't
+                                            // linger as a ghost entry after the outbound is gone.
+                                            val balancerTags = try { config.getBalancerTags() } catch (_: Exception) { emptyList() }
+                                            if (proxy.tag in balancerTags) {
+                                                val remaining = balancerTags - proxy.tag
+                                                if (remaining.isNotEmpty()) {
+                                                    config.setBalancerTags(remaining)
+                                                }
+                                            }
                                             val test = cmds.testConfig()
                                             if (!test.ok) { actionMessage = "Config test failed"; return@launch }
                                             cmds.restartXkeen()
