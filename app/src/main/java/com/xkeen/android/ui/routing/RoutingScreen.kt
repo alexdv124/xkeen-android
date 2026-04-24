@@ -49,7 +49,7 @@ fun RoutingScreen(sshClient: SshClient?) {
             try {
                 val config = XrayConfigRemote(sshClient)
                 val cmds = RouterCommands(sshClient)
-                val (ok, msg) = config.applyPreset(preset, routingConfig.customRoutes)
+                val (ok, msg) = config.applyPreset(preset, routingConfig.customRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock)
                 if (!ok) { message = msg; return@launch }
                 val test = cmds.testConfig()
                 if (!test.ok) {
@@ -116,7 +116,7 @@ fun RoutingScreen(sshClient: SshClient?) {
             onClick = { applyPresetAndRestart(RoutingPreset.ALL_DIRECT) }
         )
 
-        // === QUIC TOGGLE ===
+        // === QUIC TOGGLE (iptables ICMP reject) ===
         Card(Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
             Row(
@@ -127,24 +127,64 @@ fun RoutingScreen(sshClient: SshClient?) {
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text("Блокировать QUIC", fontWeight = FontWeight.Medium)
-                    Text("UDP/443 → block. Без этого YouTube может тормозить",
+                    Text("UDP/443 → ICMP reject. Мгновенный fallback на TCP, без задержек",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Switch(
+                    enabled = !loading,
                     checked = routingConfig.quicBlocked,
                     onCheckedChange = { checked ->
-                        // QUIC state is part of preset, reapply with toggle
-                        val newConfig = routingConfig.copy(quicBlocked = checked)
+                        scope.launch {
+                            loading = true
+                            try {
+                                val cmds = RouterCommands(sshClient)
+                                val config = XrayConfigRemote(sshClient)
+                                val (ok, msg) = cmds.applyQuicReject(checked)
+                                if (!ok) { message = msg; return@launch }
+                                // Rebuild routing to remove any legacy UDP 443 xray block rule
+                                config.applyPreset(routingConfig.preset, routingConfig.customRoutes, checked, routingConfig.youtubeUnblock)
+                                if (cmds.testConfig().ok) {
+                                    cmds.restartXkeen()
+                                    message = if (checked) "QUIC заблокирован (ICMP)" else "QUIC разблокирован"
+                                    refresh()
+                                } else { message = "Config test failed" }
+                            } catch (e: Exception) { message = e.message }
+                            finally { loading = false }
+                        }
+                    }
+                )
+            }
+        }
+
+        // === YOUTUBE UNBLOCK TOGGLE ===
+        Card(Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+            Row(
+                Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.PlayCircle, null, Modifier.size(20.dp))
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Проксировать YouTube", fontWeight = FontWeight.Medium)
+                    Text("googlevideo/youtube/ytimg через VPN. Решает проблему Shorts с ТСПУ-троттлингом",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(
+                    enabled = !loading,
+                    checked = routingConfig.youtubeUnblock,
+                    onCheckedChange = { checked ->
                         scope.launch {
                             loading = true
                             try {
                                 val config = XrayConfigRemote(sshClient)
                                 val cmds = RouterCommands(sshClient)
-                                config.applyPreset(newConfig.preset, newConfig.customRoutes)
+                                config.applyPreset(routingConfig.preset, routingConfig.customRoutes, routingConfig.quicBlocked, checked)
                                 if (cmds.testConfig().ok) {
                                     cmds.restartXkeen()
-                                    message = if (checked) "QUIC заблокирован" else "QUIC разблокирован"
+                                    message = if (checked) "YouTube через VPN" else "YouTube через geo-правила"
                                     refresh()
                                 } else { message = "Config test failed" }
                             } catch (e: Exception) { message = e.message }
@@ -358,7 +398,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                                         try {
                                             val config = XrayConfigRemote(sshClient)
                                             val cmds = RouterCommands(sshClient)
-                                            config.applyPreset(routingConfig.preset, newRoutes)
+                                            config.applyPreset(routingConfig.preset, newRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock)
                                             if (cmds.testConfig().ok) { cmds.restartXkeen(); refresh() }
                                             else { message = "Тест конфига провалился" }
                                         } catch (e: Exception) { message = e.message }
@@ -542,7 +582,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                     try {
                         val config = XrayConfigRemote(sshClient)
                         val cmds = RouterCommands(sshClient)
-                        config.applyPreset(routingConfig.preset, newRoutes)
+                        config.applyPreset(routingConfig.preset, newRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock)
                         if (cmds.testConfig().ok) {
                             cmds.restartXkeen()
                             message = "Маршрут добавлен: ${route.value}"
@@ -575,7 +615,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                         try {
                             val config = XrayConfigRemote(sshClient)
                             val cmds = RouterCommands(sshClient)
-                            config.applyPreset(routingConfig.preset, newRoutes)
+                            config.applyPreset(routingConfig.preset, newRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock)
                             if (cmds.testConfig().ok) {
                                 cmds.restartXkeen()
                                 message = "Aqara Cloud → VPN"
@@ -634,7 +674,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                         try {
                             val config = XrayConfigRemote(sshClient)
                             val cmds = RouterCommands(sshClient)
-                            config.applyPreset(routingConfig.preset, newRoutes)
+                            config.applyPreset(routingConfig.preset, newRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock)
                             if (cmds.testConfig().ok) {
                                 cmds.restartXkeen()
                                 message = "Маршрут добавлен: ${dev.ip} → ${if (selectedTarget == "proxy") "VPN" else "напрямую"}"

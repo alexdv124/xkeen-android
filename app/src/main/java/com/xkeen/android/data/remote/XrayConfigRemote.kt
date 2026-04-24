@@ -326,6 +326,14 @@ class XrayConfigRemote(private val ssh: SshClient) {
             CustomRoute("169.197.117.0/24", "proxy", "Aqara Cloud (MQTT)")
         )
 
+        val YOUTUBE_DOMAINS = listOf(
+            "domain:googlevideo.com",
+            "domain:youtube.com",
+            "domain:ytimg.com",
+            "domain:youtu.be",
+            "domain:ggpht.com"
+        )
+
         private const val CUSTOM_RULE_TAG_PREFIX = "xkeen-custom-"
     }
 
@@ -394,23 +402,39 @@ class XrayConfigRemote(private val ssh: SshClient) {
                 }
             }
 
-            // Domain-based routes (not geosite presets, not standard TLDs)
+            // Domain-based routes (not geosite presets, not standard TLDs, not YouTube preset)
             val domains = obj["domain"]?.jsonArray
             domains?.forEach { domEl ->
                 val dom = domEl.jsonPrimitive.content
                 if (!dom.startsWith("ext:") && !dom.startsWith("geosite") &&
-                    dom != "domain:ru" && dom != "domain:su" && dom != "domain:рф") {
+                    dom != "domain:ru" && dom != "domain:su" && dom != "domain:рф" &&
+                    dom !in YOUTUBE_DOMAINS) {
                     val cleanDomain = dom.removePrefix("domain:").removePrefix("full:")
                     customRoutes.add(CustomRoute(cleanDomain, routeTarget, "", routeType = "domain"))
                 }
             }
         }
 
-        val quicBlocked = rules.any { rule ->
+        val quicXrayBlocked = rules.any { rule ->
             val obj = rule.jsonObject
             obj["network"]?.jsonPrimitive?.content == "udp" &&
                 obj["port"]?.jsonPrimitive?.content?.contains("443") == true &&
                 obj["outboundTag"]?.jsonPrimitive?.content == "block"
+        }
+        val quicIptablesBlocked = try {
+            ssh.exec(
+                "iptables -C FORWARD -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable 2>/dev/null && echo yes"
+            ).stdout.trim() == "yes"
+        } catch (_: Exception) { false }
+        val quicBlocked = quicXrayBlocked || quicIptablesBlocked
+
+        // Detect YouTube preset: rule with googlevideo.com going through balancer/proxy
+        val youtubeUnblock = rules.any { rule ->
+            val obj = rule.jsonObject
+            val domains = obj["domain"]?.jsonArray
+            val hasProxyTarget = obj.containsKey("balancerTag") ||
+                obj["outboundTag"]?.jsonPrimitive?.content?.startsWith("proxy-") == true
+            hasProxyTarget && domains?.any { it.jsonPrimitive.content == "domain:googlevideo.com" } == true
         }
 
         val mode = getRoutingMode()
@@ -421,7 +445,8 @@ class XrayConfigRemote(private val ssh: SshClient) {
             mode = mode,
             balancerTags = balancerTags,
             customRoutes = customRoutes,
-            quicBlocked = quicBlocked
+            quicBlocked = quicBlocked,
+            youtubeUnblock = youtubeUnblock
         )
     }
 
@@ -660,7 +685,12 @@ class XrayConfigRemote(private val ssh: SshClient) {
         else -> JsonPrimitive(v.toString())
     }
 
-    suspend fun applyPreset(preset: RoutingPreset, customRoutes: List<CustomRoute> = emptyList()): Pair<Boolean, String> {
+    suspend fun applyPreset(
+        preset: RoutingPreset,
+        customRoutes: List<CustomRoute> = emptyList(),
+        quicBlocked: Boolean = true,
+        youtubeUnblock: Boolean = false
+    ): Pair<Boolean, String> {
         val raw = ssh.readFile(Paths.ROUTING)
         val config = Json.parseToJsonElement(raw).jsonObject.toMutableMap()
         val routing = config["routing"]?.jsonObject?.toMutableMap()
@@ -673,13 +703,16 @@ class XrayConfigRemote(private val ssh: SshClient) {
 
         val rules = mutableListOf<JsonObject>()
 
-        // 1. Always: QUIC block (UDP 443)
+        // 1. Block NetBIOS/SMB broadcast on UDP. QUIC (UDP 443) is handled
+        // via iptables ICMP reject (see RouterCommands.applyQuicReject) — faster
+        // than xray blackhole which silently drops and causes 7s browser retry.
+        val udpBlockPorts = if (quicBlocked) "135,137,138,139" else "135,137,138,139"
         rules.add(buildJsonObject {
             put("type", "field")
             put("inboundTag", inboundTags)
             put("outboundTag", "block")
             put("network", "udp")
-            put("port", "135,137,138,139,443")
+            put("port", udpBlockPorts)
         })
 
         // 2. Source-based routes (LAN devices → proxy/direct)
@@ -742,6 +775,23 @@ class XrayConfigRemote(private val ssh: SshClient) {
                 put("inboundTag", inboundTags)
                 putJsonArray("domain") {
                     proxyCustomDomains.forEach { add(JsonPrimitive("domain:${it.value}")) }
+                }
+                if (hasBalancerForCustom) put("balancerTag", "proxy-balancer")
+                else {
+                    val firstProxy = getProxyList().firstOrNull()?.tag ?: "direct"
+                    put("outboundTag", firstProxy)
+                }
+            })
+        }
+
+        // 3c. YouTube preset (anti-throttling): proxy ALL *.googlevideo / youtube / ytimg / etc
+        // Must be placed BEFORE geoip:ru to override Google Global Cache in RU ISPs.
+        if (youtubeUnblock) {
+            rules.add(buildJsonObject {
+                put("type", "field")
+                put("inboundTag", inboundTags)
+                putJsonArray("domain") {
+                    YOUTUBE_DOMAINS.forEach { add(JsonPrimitive(it)) }
                 }
                 if (hasBalancerForCustom) put("balancerTag", "proxy-balancer")
                 else {

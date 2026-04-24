@@ -162,6 +162,52 @@ class RouterCommands(private val ssh: SshClient) {
         return Pair(out.isNotEmpty(), out)
     }
 
+    // ========== QUIC fast-reject via iptables ==========
+    // Replaces xray blackhole (silent drop causing ~7s browser timeout)
+    // with ICMP port-unreachable (instant TCP fallback).
+
+    private val quicHookPath = "/opt/etc/ndm/netfilter.d/xkeen-quic-reject.sh"
+    private val quicHookScript = """#!/bin/sh
+# Fast-reject QUIC (UDP 443) with ICMP port-unreachable
+# Managed by XKeen Android app
+if iptables -t mangle -n -L xkeen >/dev/null 2>&1; then
+    if ! iptables -t mangle -C xkeen -p udp --dport 443 -j RETURN 2>/dev/null; then
+        iptables -t mangle -I xkeen 1 -p udp --dport 443 -j RETURN
+    fi
+fi
+if ! iptables -C FORWARD -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable 2>/dev/null; then
+    iptables -I FORWARD 1 -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable
+fi
+"""
+
+    suspend fun isQuicRejectEnabled(): Boolean {
+        val exists = ssh.exec("test -x $quicHookPath && echo yes").stdout.trim() == "yes"
+        val ruleActive = ssh.exec(
+            "iptables -C FORWARD -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable 2>/dev/null && echo yes"
+        ).stdout.trim() == "yes"
+        return exists || ruleActive
+    }
+
+    suspend fun applyQuicReject(enable: Boolean): Pair<Boolean, String> {
+        return try {
+            if (enable) {
+                ssh.writeFileB64(quicHookPath, quicHookScript)
+                ssh.exec("chmod +x $quicHookPath && $quicHookPath")
+                Pair(true, "QUIC fast-reject enabled")
+            } else {
+                ssh.exec(
+                    "rm -f $quicHookPath; " +
+                    "iptables -t mangle -D xkeen -p udp --dport 443 -j RETURN 2>/dev/null; " +
+                    "iptables -D FORWARD -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable 2>/dev/null; " +
+                    "echo done"
+                )
+                Pair(true, "QUIC fast-reject disabled")
+            }
+        } catch (e: Exception) {
+            Pair(false, e.message ?: "iptables error")
+        }
+    }
+
     // ========== My IP ==========
 
     suspend fun getExternalIp(): ExternalIpInfo {

@@ -83,7 +83,8 @@ data class RoutingConfig(
     val mode: RoutingMode = RoutingMode.Auto,
     val balancerTags: List<String> = emptyList(),
     val customRoutes: List<CustomRoute> = emptyList(),
-    val quicBlocked: Boolean = true
+    val quicBlocked: Boolean = true,
+    val youtubeUnblock: Boolean = false
 )
 
 data class SetupState(
