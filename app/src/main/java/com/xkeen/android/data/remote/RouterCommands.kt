@@ -168,24 +168,28 @@ class RouterCommands(private val ssh: SshClient) {
 
     private val quicHookPath = "/opt/etc/ndm/netfilter.d/xkeen-quic-reject.sh"
     private val quicHookScript = """#!/bin/sh
-# Fast-reject QUIC (UDP 443) with ICMP port-unreachable
-# Managed by XKeen Android app
-if iptables -t mangle -n -L xkeen >/dev/null 2>&1; then
-    if ! iptables -t mangle -C xkeen -p udp --dport 443 -j RETURN 2>/dev/null; then
-        iptables -t mangle -I xkeen 1 -p udp --dport 443 -j RETURN
-    fi
+# Fast-reject QUIC (UDP 443) with ICMP port-unreachable.
+# Managed by XKeen Android app.
+#
+# Strategy: ACCEPT in mangle PREROUTING at position 1, BEFORE xkeen sub-chain.
+# Packet bypasses xkeen TPROXY, continues to filter FORWARD where REJECT
+# sends ICMP port-unreachable -> browser instantly falls back to TCP.
+# Both rules live in parent chains, so xkeen -restart does NOT erase them.
+
+if ! iptables -t mangle -C PREROUTING -p udp --dport 443 -j ACCEPT 2>/dev/null; then
+    iptables -t mangle -I PREROUTING 1 -p udp --dport 443 -j ACCEPT
 fi
+
 if ! iptables -C FORWARD -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable 2>/dev/null; then
     iptables -I FORWARD 1 -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable
 fi
 """
 
     suspend fun isQuicRejectEnabled(): Boolean {
-        val exists = ssh.exec("test -x $quicHookPath && echo yes").stdout.trim() == "yes"
         val ruleActive = ssh.exec(
             "iptables -C FORWARD -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable 2>/dev/null && echo yes"
         ).stdout.trim() == "yes"
-        return exists || ruleActive
+        return ruleActive
     }
 
     suspend fun applyQuicReject(enable: Boolean): Pair<Boolean, String> {
@@ -197,6 +201,8 @@ fi
             } else {
                 ssh.exec(
                     "rm -f $quicHookPath; " +
+                    // Clean up current and any legacy rule placements
+                    "iptables -t mangle -D PREROUTING -p udp --dport 443 -j ACCEPT 2>/dev/null; " +
                     "iptables -t mangle -D xkeen -p udp --dport 443 -j RETURN 2>/dev/null; " +
                     "iptables -D FORWARD -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable 2>/dev/null; " +
                     "echo done"
