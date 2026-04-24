@@ -26,7 +26,6 @@ fun RoutingScreen(sshClient: SshClient?) {
     var loading by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var showCustomRouteDialog by remember { mutableStateOf(false) }
-    var showAqaraDialog by remember { mutableStateOf(false) }
     var deviceToRoute by remember { mutableStateOf<com.xkeen.android.data.remote.NetworkDevice?>(null) }
 
     fun refresh() {
@@ -49,7 +48,7 @@ fun RoutingScreen(sshClient: SshClient?) {
             try {
                 val config = XrayConfigRemote(sshClient)
                 val cmds = RouterCommands(sshClient)
-                val (ok, msg) = config.applyPreset(preset, routingConfig.customRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock)
+                val (ok, msg) = config.applyPreset(preset, routingConfig.customRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock, routingConfig.aqaraEnabled)
                 if (!ok) { message = msg; return@launch }
                 val test = cmds.testConfig()
                 if (!test.ok) {
@@ -143,7 +142,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                                 val (ok, msg) = cmds.applyQuicReject(checked)
                                 if (!ok) { message = msg; return@launch }
                                 // Rebuild routing to remove any legacy UDP 443 xray block rule
-                                config.applyPreset(routingConfig.preset, routingConfig.customRoutes, checked, routingConfig.youtubeUnblock)
+                                config.applyPreset(routingConfig.preset, routingConfig.customRoutes, checked, routingConfig.youtubeUnblock, routingConfig.aqaraEnabled)
                                 if (cmds.testConfig().ok) {
                                     cmds.restartXkeen()
                                     message = if (checked) "QUIC заблокирован (ICMP)" else "QUIC разблокирован"
@@ -181,10 +180,50 @@ fun RoutingScreen(sshClient: SshClient?) {
                             try {
                                 val config = XrayConfigRemote(sshClient)
                                 val cmds = RouterCommands(sshClient)
-                                config.applyPreset(routingConfig.preset, routingConfig.customRoutes, routingConfig.quicBlocked, checked)
+                                config.applyPreset(routingConfig.preset, routingConfig.customRoutes, routingConfig.quicBlocked, checked, routingConfig.aqaraEnabled)
                                 if (cmds.testConfig().ok) {
                                     cmds.restartXkeen()
                                     message = if (checked) "YouTube через VPN" else "YouTube через geo-правила"
+                                    refresh()
+                                } else { message = "Config test failed" }
+                            } catch (e: Exception) { message = e.message }
+                            finally { loading = false }
+                        }
+                    }
+                )
+            }
+        }
+
+        // === AQARA TOGGLE (smart home) ===
+        Card(Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+            Row(
+                Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(Icons.Default.Videocam, null, Modifier.size(20.dp))
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Проксировать Aqara (умный дом)", fontWeight = FontWeight.Medium)
+                    Text("Kingsoft Cloud IP + домены aqara.com/cn через VPN. Решает ТСПУ-блок хаба и приложения",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(
+                    enabled = !loading,
+                    checked = routingConfig.aqaraEnabled,
+                    onCheckedChange = { checked ->
+                        scope.launch {
+                            loading = true
+                            try {
+                                val config = XrayConfigRemote(sshClient)
+                                val cmds = RouterCommands(sshClient)
+                                // Also strip any legacy Aqara custom routes so they don't duplicate the preset
+                                val cleaned = routingConfig.customRoutes.filterNot { it.comment.contains("Aqara") }
+                                config.applyPreset(routingConfig.preset, cleaned, routingConfig.quicBlocked, routingConfig.youtubeUnblock, checked)
+                                if (cmds.testConfig().ok) {
+                                    cmds.restartXkeen()
+                                    message = if (checked) "Aqara через VPN" else "Aqara через geo-правила"
                                     refresh()
                                 } else { message = "Config test failed" }
                             } catch (e: Exception) { message = e.message }
@@ -315,21 +354,8 @@ fun RoutingScreen(sshClient: SshClient?) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text("Особые маршруты", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Row {
-                    // Aqara preset button
-                    val hasAqara = routingConfig.customRoutes.any { it.comment.contains("Aqara") }
-                    if (!hasAqara) {
-                        AssistChip(
-                            onClick = { showAqaraDialog = true },
-                            enabled = !loading,
-                            label = { Text("Aqara") },
-                            leadingIcon = { Icon(Icons.Default.Videocam, null, Modifier.size(16.dp)) }
-                        )
-                        Spacer(Modifier.width(4.dp))
-                    }
-                    IconButton(onClick = { showCustomRouteDialog = true }, enabled = !loading) {
-                        Icon(Icons.Default.Add, "Добавить маршрут")
-                    }
+                IconButton(onClick = { showCustomRouteDialog = true }, enabled = !loading) {
+                    Icon(Icons.Default.Add, "Добавить маршрут")
                 }
             }
 
@@ -398,7 +424,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                                         try {
                                             val config = XrayConfigRemote(sshClient)
                                             val cmds = RouterCommands(sshClient)
-                                            config.applyPreset(routingConfig.preset, newRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock)
+                                            config.applyPreset(routingConfig.preset, newRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock, routingConfig.aqaraEnabled)
                                             if (cmds.testConfig().ok) { cmds.restartXkeen(); refresh() }
                                             else { message = "Тест конфига провалился" }
                                         } catch (e: Exception) { message = e.message }
@@ -582,7 +608,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                     try {
                         val config = XrayConfigRemote(sshClient)
                         val cmds = RouterCommands(sshClient)
-                        config.applyPreset(routingConfig.preset, newRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock)
+                        config.applyPreset(routingConfig.preset, newRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock, routingConfig.aqaraEnabled)
                         if (cmds.testConfig().ok) {
                             cmds.restartXkeen()
                             message = "Маршрут добавлен: ${route.value}"
@@ -592,41 +618,6 @@ fun RoutingScreen(sshClient: SshClient?) {
                     finally { loading = false }
                 }
             }
-        )
-    }
-
-    if (showAqaraDialog) {
-        AlertDialog(
-            onDismissRequest = { showAqaraDialog = false },
-            icon = { Icon(Icons.Default.Videocam, null) },
-            title = { Text("Aqara Cloud через VPN") },
-            text = {
-                Text("Добавить серверы Aqara (Kingsoft Cloud) в маршрут через VPN? " +
-                    "Это поможет если умные устройства Aqara работают нестабильно " +
-                    "из-за блокировок провайдера (ТСПУ).\n\n" +
-                    "IP: 107.155.52.0/23, 169.197.117.0/24")
-            },
-            confirmButton = {
-                Button(onClick = {
-                    showAqaraDialog = false
-                    val newRoutes = routingConfig.customRoutes + XrayConfigRemote.AQARA_PRESET
-                    scope.launch {
-                        loading = true
-                        try {
-                            val config = XrayConfigRemote(sshClient)
-                            val cmds = RouterCommands(sshClient)
-                            config.applyPreset(routingConfig.preset, newRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock)
-                            if (cmds.testConfig().ok) {
-                                cmds.restartXkeen()
-                                message = "Aqara Cloud → VPN"
-                                refresh()
-                            } else { message = "Config test failed" }
-                        } catch (e: Exception) { message = e.message }
-                        finally { loading = false }
-                    }
-                }) { Text("Добавить") }
-            },
-            dismissButton = { TextButton(onClick = { showAqaraDialog = false }) { Text("Отмена") } }
         )
     }
 
@@ -674,7 +665,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                         try {
                             val config = XrayConfigRemote(sshClient)
                             val cmds = RouterCommands(sshClient)
-                            config.applyPreset(routingConfig.preset, newRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock)
+                            config.applyPreset(routingConfig.preset, newRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock, routingConfig.aqaraEnabled)
                             if (cmds.testConfig().ok) {
                                 cmds.restartXkeen()
                                 message = "Маршрут добавлен: ${dev.ip} → ${if (selectedTarget == "proxy") "VPN" else "напрямую"}"

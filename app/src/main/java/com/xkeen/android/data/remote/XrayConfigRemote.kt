@@ -321,9 +321,23 @@ class XrayConfigRemote(private val ssh: SshClient) {
     // ========== Routing Presets & Custom Routes ==========
 
     companion object {
+        // Legacy — kept for backward compatibility. New installs should use aqaraEnabled flag.
         val AQARA_PRESET = listOf(
             CustomRoute("107.155.52.0/23", "proxy", "Aqara Cloud (CDN)"),
             CustomRoute("169.197.117.0/24", "proxy", "Aqara Cloud (MQTT)")
+        )
+
+        // Hub resolves these Kingsoft Cloud IPs via its internal DNS.
+        val AQARA_IPS = listOf(
+            "107.155.52.0/23",
+            "169.197.117.0/24"
+        )
+
+        // Phone app resolves rpc-ru.aqara.com etc. to completely different IPs
+        // outside AQARA_IPS — domain matching via TLS SNI handles both cases.
+        val AQARA_DOMAINS = listOf(
+            "domain:aqara.com",
+            "domain:aqara.cn"
         )
 
         val YOUTUBE_DOMAINS = listOf(
@@ -385,30 +399,26 @@ class XrayConfigRemote(private val ssh: SshClient) {
                 customRoutes.add(CustomRoute(src, routeTarget, "Устройство", routeType = "source"))
             }
 
-            // Destination IP routes (not geoip, not standard private ranges)
+            // Destination IP routes (not geoip, not standard private ranges, not Aqara preset)
             val ips = obj["ip"]?.jsonArray
             ips?.forEach { ipEl ->
                 val ip = ipEl.jsonPrimitive.content
                 if (!ip.startsWith("ext:") && !ip.startsWith("geoip") &&
                     ip != "0.0.0.0/8" && !ip.startsWith("10.") && !ip.startsWith("127.") &&
                     !ip.startsWith("172.16.") && !ip.startsWith("192.168.") &&
-                    !ip.startsWith("169.254.") && !ip.startsWith("224.") && ip != "255.255.255.255/32") {
-                    val comment = when {
-                        ip.startsWith("107.155.52") || ip.startsWith("107.155.53") -> "Aqara Cloud (CDN)"
-                        ip.startsWith("169.197.117") -> "Aqara Cloud (MQTT)"
-                        else -> ""
-                    }
-                    customRoutes.add(CustomRoute(ip, routeTarget, comment))
+                    !ip.startsWith("169.254.") && !ip.startsWith("224.") && ip != "255.255.255.255/32" &&
+                    ip !in AQARA_IPS) {
+                    customRoutes.add(CustomRoute(ip, routeTarget, ""))
                 }
             }
 
-            // Domain-based routes (not geosite presets, not standard TLDs, not YouTube preset)
+            // Domain-based routes (not geosite presets, not standard TLDs, not YouTube/Aqara preset)
             val domains = obj["domain"]?.jsonArray
             domains?.forEach { domEl ->
                 val dom = domEl.jsonPrimitive.content
                 if (!dom.startsWith("ext:") && !dom.startsWith("geosite") &&
                     dom != "domain:ru" && dom != "domain:su" && dom != "domain:рф" &&
-                    dom !in YOUTUBE_DOMAINS) {
+                    dom !in YOUTUBE_DOMAINS && dom !in AQARA_DOMAINS) {
                     val cleanDomain = dom.removePrefix("domain:").removePrefix("full:")
                     customRoutes.add(CustomRoute(cleanDomain, routeTarget, "", routeType = "domain"))
                 }
@@ -437,6 +447,17 @@ class XrayConfigRemote(private val ssh: SshClient) {
             hasProxyTarget && domains?.any { it.jsonPrimitive.content == "domain:googlevideo.com" } == true
         }
 
+        // Detect Aqara preset: either Aqara IPs or aqara.com domain routed to proxy
+        val aqaraEnabled = rules.any { rule ->
+            val obj = rule.jsonObject
+            val hasProxyTarget = obj.containsKey("balancerTag") ||
+                obj["outboundTag"]?.jsonPrimitive?.content?.startsWith("proxy-") == true
+            if (!hasProxyTarget) return@any false
+            val ips = obj["ip"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
+            val domains = obj["domain"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
+            ips.any { it in AQARA_IPS } || domains.any { it in AQARA_DOMAINS }
+        }
+
         val mode = getRoutingMode()
         val balancerTags = try { getBalancerTags() } catch (_: Exception) { emptyList() }
 
@@ -446,7 +467,8 @@ class XrayConfigRemote(private val ssh: SshClient) {
             balancerTags = balancerTags,
             customRoutes = customRoutes,
             quicBlocked = quicBlocked,
-            youtubeUnblock = youtubeUnblock
+            youtubeUnblock = youtubeUnblock,
+            aqaraEnabled = aqaraEnabled
         )
     }
 
@@ -689,7 +711,8 @@ class XrayConfigRemote(private val ssh: SshClient) {
         preset: RoutingPreset,
         customRoutes: List<CustomRoute> = emptyList(),
         quicBlocked: Boolean = true,
-        youtubeUnblock: Boolean = false
+        youtubeUnblock: Boolean = false,
+        aqaraEnabled: Boolean = false
     ): Pair<Boolean, String> {
         val raw = ssh.readFile(Paths.ROUTING)
         val config = Json.parseToJsonElement(raw).jsonObject.toMutableMap()
@@ -792,6 +815,35 @@ class XrayConfigRemote(private val ssh: SshClient) {
                 put("inboundTag", inboundTags)
                 putJsonArray("domain") {
                     YOUTUBE_DOMAINS.forEach { add(JsonPrimitive(it)) }
+                }
+                if (hasBalancerForCustom) put("balancerTag", "proxy-balancer")
+                else {
+                    val firstProxy = getProxyList().firstOrNull()?.tag ?: "direct"
+                    put("outboundTag", firstProxy)
+                }
+            })
+        }
+
+        // 3d. Aqara preset: proxy Kingsoft Cloud IPs (hub) + aqara.com domain (phone app).
+        // Kingsoft IPs live inside geoip:ru, so this must be BEFORE geoip:ru rule.
+        if (aqaraEnabled) {
+            rules.add(buildJsonObject {
+                put("type", "field")
+                put("inboundTag", inboundTags)
+                putJsonArray("ip") {
+                    AQARA_IPS.forEach { add(JsonPrimitive(it)) }
+                }
+                if (hasBalancerForCustom) put("balancerTag", "proxy-balancer")
+                else {
+                    val firstProxy = getProxyList().firstOrNull()?.tag ?: "direct"
+                    put("outboundTag", firstProxy)
+                }
+            })
+            rules.add(buildJsonObject {
+                put("type", "field")
+                put("inboundTag", inboundTags)
+                putJsonArray("domain") {
+                    AQARA_DOMAINS.forEach { add(JsonPrimitive(it)) }
                 }
                 if (hasBalancerForCustom) put("balancerTag", "proxy-balancer")
                 else {
