@@ -86,6 +86,9 @@ class VlessParser {
         val spx = params["spx"] ?: ""
         val host = params["host"] ?: address
         val path = params["path"] ?: "/"
+        // mode= comes from the link (e.g. "auto", "packet-up", "stream-up", "stream-one"). Default "packet-up" for older
+        // links that don't specify it. Some servers (e.g. e0f.host) require mode="auto" — hardcoding "packet-up" broke them.
+        val mode = params["mode"] ?: "packet-up"
 
         val extraRaw = params["extra"] ?: "{}"
         val extraDecoded = URLDecoder.decode(extraRaw, "UTF-8")
@@ -133,7 +136,7 @@ class VlessParser {
                     put("spiderX", spx)
                 }
                 putJsonObject("xhttpSettings") {
-                    put("mode", "packet-up")
+                    put("mode", mode)
                     put("host", host)
                     put("path", path)
                     putJsonObject("extra") {

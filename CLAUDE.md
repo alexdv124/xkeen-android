@@ -101,6 +101,9 @@ When user adds 2nd proxy to a single-server config (no balancer), `ProxiesScreen
 - `VlessParser`: now parses the `fm=` query parameter (TLS-fragmentation settings, e.g. `{"fragment":{"length":"50-100","packets":"tlshello","interval":"10-20"}}`). When present, the proxy outbound gets `streamSettings.sockopt.dialerProxy="fragment"` and `XrayConfigRemote.addOutbound`/`initialSetup` ensure a shared `fragment` freedom outbound exists in `04_outbounds.json`. Without this, providers that rely on TLS-hello fragmentation to bypass DPI (e.g. `e0f.network`) silently fail on the router even though the same link works in mobile clients that honour `fm=`.
 - `ParsedVless` gained `fragmentSettings: Map<String, Any?>?` so callers can propagate the parsed fragment block to the JSON writer.
 
+### Bugs fixed (v1.2.5)
+- `VlessParser.buildXhttpOutbound`: stopped hardcoding `streamSettings.xhttpSettings.mode = "packet-up"`. Now reads `mode=` from the link (e.g. `auto`, `stream-one`, `stream-up`) and falls back to `packet-up` only if absent. Some providers (e.g. `api.e0f.host`) require `mode=auto`; hardcoding `packet-up` made the tunnel handshake but pass zero data — same symptom as before, but for a different reason than fm-fragmentation.
+
 ### ps output format (busybox on Keenetic)
 ```
 PID   USER     VSZ   STAT  COMMAND
