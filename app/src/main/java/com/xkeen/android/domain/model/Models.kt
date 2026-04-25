@@ -101,5 +101,6 @@ data class ParsedVless(
     val address: String,
     val port: Int,
     val transport: String,
-    val outbound: Map<String, Any?>
+    val outbound: Map<String, Any?>,
+    val fragmentSettings: Map<String, Any?>? = null
 )

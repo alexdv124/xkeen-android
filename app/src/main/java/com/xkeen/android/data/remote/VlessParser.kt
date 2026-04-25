@@ -40,10 +40,20 @@ class VlessParser {
         val flow = params["flow"] ?: ""
         val tag = generateTag(name, address)
 
+        // fm= carries TLS-fragmentation settings, e.g. {"fragment":{"length":"50-100","packets":"tlshello","interval":"10-20"}}
+        // When present, build a freedom outbound "fragment" and route the proxy outbound through it via sockopt.dialerProxy.
+        val fragmentSettings: JsonObject? = params["fm"]?.takeIf { it.isNotBlank() }?.let { raw ->
+            runCatching {
+                val obj = Json.parseToJsonElement(raw).jsonObject
+                obj["fragment"]?.let { intsFromWholeFloats(it).jsonObject }
+            }.getOrNull()
+        }
+        val useFragment = fragmentSettings != null
+
         val outbound = if (transport == "xhttp") {
-            buildXhttpOutbound(tag, address, port, uuid, params)
+            buildXhttpOutbound(tag, address, port, uuid, params, useFragment)
         } else {
-            buildVisionOutbound(tag, address, port, uuid, params, flow.ifEmpty { "xtls-rprx-vision" })
+            buildVisionOutbound(tag, address, port, uuid, params, flow.ifEmpty { "xtls-rprx-vision" }, useFragment)
         }
 
         return ParsedVless(
@@ -52,7 +62,8 @@ class VlessParser {
             address = address,
             port = port,
             transport = if (transport == "xhttp") "xhttp" else if (flow.isNotEmpty()) "vision" else "tcp",
-            outbound = jsonToMap(outbound)
+            outbound = jsonToMap(outbound),
+            fragmentSettings = fragmentSettings?.let { jsonToMap(it) }
         )
     }
 
@@ -67,7 +78,7 @@ class VlessParser {
         return "proxy-${short.ifEmpty { "new" }}"
     }
 
-    private fun buildXhttpOutbound(tag: String, address: String, port: Int, uuid: String, params: Map<String, String>): JsonObject {
+    private fun buildXhttpOutbound(tag: String, address: String, port: Int, uuid: String, params: Map<String, String>, useFragment: Boolean = false): JsonObject {
         val sni = params["sni"] ?: address
         val fp = params["fp"] ?: "chrome"
         val pbk = params["pbk"] ?: ""
@@ -134,11 +145,16 @@ class VlessParser {
                         put("downloadSettings", downloadSettings)
                     }
                 }
+                if (useFragment) {
+                    putJsonObject("sockopt") {
+                        put("dialerProxy", "fragment")
+                    }
+                }
             }
         }
     }
 
-    private fun buildVisionOutbound(tag: String, address: String, port: Int, uuid: String, params: Map<String, String>, flow: String): JsonObject {
+    private fun buildVisionOutbound(tag: String, address: String, port: Int, uuid: String, params: Map<String, String>, flow: String, useFragment: Boolean = false): JsonObject {
         val sni = params["sni"] ?: address
         val fp = params["fp"] ?: "chrome"
         val pbk = params["pbk"] ?: ""
@@ -172,6 +188,11 @@ class VlessParser {
                     put("serverName", sni)
                     put("shortId", sid)
                     put("spiderX", "")
+                }
+                if (useFragment) {
+                    putJsonObject("sockopt") {
+                        put("dialerProxy", "fragment")
+                    }
                 }
             }
         }

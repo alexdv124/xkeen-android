@@ -46,7 +46,7 @@ class XrayConfigRemote(private val ssh: SshClient) {
         }
     }
 
-    suspend fun addOutbound(outbound: JsonObject): Pair<Boolean, String> {
+    suspend fun addOutbound(outbound: JsonObject, fragmentSettings: JsonObject? = null): Pair<Boolean, String> {
         val raw = ssh.readFile(Paths.OUTBOUNDS)
         val config = Json.parseToJsonElement(raw).jsonObject.toMutableMap()
         val outbounds = config["outbounds"]?.jsonArray?.toMutableList()
@@ -55,6 +55,19 @@ class XrayConfigRemote(private val ssh: SshClient) {
         val tag = outbound["tag"]?.jsonPrimitive?.content ?: return Pair(false, "No tag")
         if (outbounds.any { it.jsonObject["tag"]?.jsonPrimitive?.content == tag }) {
             return Pair(false, "Tag $tag already exists")
+        }
+
+        // If link declared TLS-fragment settings (fm=...), ensure a "fragment" freedom outbound exists.
+        // Different proxies that share dialerProxy="fragment" reuse one freedom outbound — keep the first one.
+        if (fragmentSettings != null && outbounds.none { it.jsonObject["tag"]?.jsonPrimitive?.content == "fragment" }) {
+            val fragmentOutbound = buildJsonObject {
+                put("tag", "fragment")
+                put("protocol", "freedom")
+                putJsonObject("settings") {
+                    put("fragment", fragmentSettings)
+                }
+            }
+            outbounds.add(0, fragmentOutbound)
         }
 
         // Insert before direct/block
@@ -507,12 +520,16 @@ class XrayConfigRemote(private val ssh: SshClient) {
         // Parse all VLESS links first
         val outbounds = mutableListOf<JsonObject>()
         val tags = mutableListOf<String>()
+        var sharedFragment: JsonObject? = null
         for (link in vlessLinks) {
             try {
                 val parsed = parser.parse(link.trim())
                 val outbound = mapToJsonObject(parsed.outbound)
                 outbounds.add(outbound)
                 tags.add(parsed.tag)
+                if (sharedFragment == null && parsed.fragmentSettings != null) {
+                    sharedFragment = mapToJsonObject(parsed.fragmentSettings)
+                }
             } catch (e: Exception) {
                 return Pair(false, "Ошибка парсинга: ${e.message}")
             }
@@ -579,7 +596,18 @@ class XrayConfigRemote(private val ssh: SshClient) {
         ssh.writeFileB64("${Paths.CONFIGS_DIR}/03_inbounds.json", inboundsConfig)
 
         // 3. Write 04_outbounds.json
-        val allOutbounds = outbounds + listOf(
+        // If any link declared TLS-fragment settings (fm=...), prepend a shared "fragment" freedom outbound
+        // so proxies can reference it via streamSettings.sockopt.dialerProxy="fragment".
+        val fragmentList = if (sharedFragment != null) listOf(
+            buildJsonObject {
+                put("tag", "fragment")
+                put("protocol", "freedom")
+                putJsonObject("settings") {
+                    put("fragment", sharedFragment)
+                }
+            }
+        ) else emptyList()
+        val allOutbounds = fragmentList + outbounds + listOf(
             buildJsonObject {
                 put("tag", "direct")
                 put("protocol", "freedom")

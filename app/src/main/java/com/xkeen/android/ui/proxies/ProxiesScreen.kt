@@ -246,7 +246,8 @@ fun ProxiesScreen(sshClient: SshClient?) {
                         }
 
                         actionMessage = "Добавляю $newTag..."
-                        val (ok, msg) = config.addOutbound(outbound)
+                        val fragmentSettings = parsed.fragmentSettings?.let { mapToJsonObject(it) }
+                        val (ok, msg) = config.addOutbound(outbound, fragmentSettings)
                         if (!ok) { actionMessage = msg; return@launch }
 
                         // Detect if we just went from 1 to 2+ proxies without balancer

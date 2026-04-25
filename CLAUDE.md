@@ -97,6 +97,10 @@ When user adds 2nd proxy to a single-server config (no balancer), `ProxiesScreen
 - Proxy status no longer lost after add/delete — delayed refresh (3s) after xray restart
 - Custom IP proxy routes now check for balancer existence instead of hardcoding `balancerTag`
 
+### Bugs fixed (v1.2.4)
+- `VlessParser`: now parses the `fm=` query parameter (TLS-fragmentation settings, e.g. `{"fragment":{"length":"50-100","packets":"tlshello","interval":"10-20"}}`). When present, the proxy outbound gets `streamSettings.sockopt.dialerProxy="fragment"` and `XrayConfigRemote.addOutbound`/`initialSetup` ensure a shared `fragment` freedom outbound exists in `04_outbounds.json`. Without this, providers that rely on TLS-hello fragmentation to bypass DPI (e.g. `e0f.network`) silently fail on the router even though the same link works in mobile clients that honour `fm=`.
+- `ParsedVless` gained `fragmentSettings: Map<String, Any?>?` so callers can propagate the parsed fragment block to the JSON writer.
+
 ### ps output format (busybox on Keenetic)
 ```
 PID   USER     VSZ   STAT  COMMAND
