@@ -104,6 +104,9 @@ When user adds 2nd proxy to a single-server config (no balancer), `ProxiesScreen
 ### Bugs fixed (v1.2.5)
 - `VlessParser.buildXhttpOutbound`: stopped hardcoding `streamSettings.xhttpSettings.mode = "packet-up"`. Now reads `mode=` from the link (e.g. `auto`, `stream-one`, `stream-up`) and falls back to `packet-up` only if absent. Some providers (e.g. `api.e0f.host`) require `mode=auto`; hardcoding `packet-up` made the tunnel handshake but pass zero data — same symptom as before, but for a different reason than fm-fragmentation.
 
+### Bugs fixed (v1.2.6)
+- `VlessParser.buildXhttpOutbound`: stopped emitting `downloadSettings: {}` when the link did not carry an `extra=` block. An empty `downloadSettings` object **panics xray-core 26.x** in `transport/internet/splithttp/dialer.go:413` the moment a connection is dialled — the inbound socks5 listener accepts, the dispatcher takes the detour, then the worker goroutine crashes silently (only visible at `loglevel: debug`). Now we only put `downloadSettings` if the link actually has it. Bug surfaced on `e0f.network` links; gofizz links happened to provide non-empty `extra.downloadSettings` so they sidestepped it.
+
 ### ps output format (busybox on Keenetic)
 ```
 PID   USER     VSZ   STAT  COMMAND

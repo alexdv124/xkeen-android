@@ -145,7 +145,11 @@ class VlessParser {
                         put("scMinPostsIntervalMs", extra["scMinPostsIntervalMs"] ?: JsonPrimitive("15-15"))
                         put("xPaddingBytes", extra["xPaddingBytes"] ?: JsonPrimitive("50-355"))
                         put("xmux", if (xmuxUpload is JsonObject && xmuxUpload.isNotEmpty()) xmuxUpload else defaultXmux)
-                        put("downloadSettings", downloadSettings)
+                        // Only include downloadSettings if the link actually carried one. An empty {} crashes
+                        // xray-core's xhttp dialer (panic in splithttp/dialer.go) — observed with e0f.network.
+                        if (downloadSettings is JsonObject && downloadSettings.isNotEmpty()) {
+                            put("downloadSettings", downloadSettings)
+                        }
                     }
                 }
                 if (useFragment) {
