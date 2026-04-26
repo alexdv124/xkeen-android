@@ -15,8 +15,8 @@ android {
         applicationId = "com.xkeen.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "1.2.6"
+        versionCode = 10
+        versionName = "1.3.0"
     }
 
     buildTypes {
@@ -92,4 +92,7 @@ dependencies {
 
     // Core
     implementation("androidx.core:core-ktx:1.15.0")
+
+    // Test
+    testImplementation("junit:junit:4.13.2")
 }

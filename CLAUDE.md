@@ -107,6 +107,13 @@ When user adds 2nd proxy to a single-server config (no balancer), `ProxiesScreen
 ### Bugs fixed (v1.2.6)
 - `VlessParser.buildXhttpOutbound`: stopped emitting `downloadSettings: {}` when the link did not carry an `extra=` block. An empty `downloadSettings` object **panics xray-core 26.x** in `transport/internet/splithttp/dialer.go:413` the moment a connection is dialled — the inbound socks5 listener accepts, the dispatcher takes the detour, then the worker goroutine crashes silently (only visible at `loglevel: debug`). Now we only put `downloadSettings` if the link actually has it. Bug surfaced on `e0f.network` links; gofizz links happened to provide non-empty `extra.downloadSettings` so they sidestepped it.
 
+### Support for security=tls (v1.3.0)
+- `VlessParser`: previously hardcoded `security: "reality"` and `realitySettings` in both `buildVisionOutbound` (TCP) and `buildXhttpOutbound` (XHTTP), ignoring the `security=` parameter from the VLESS link. Links with `security=tls` (standard TLS, no REALITY) failed with xray error "Failed to build REALITY config > empty password" because `realitySettings.publicKey` was empty.
+- Now both builders read `security=` and generate `tlsSettings` (with `serverName`, `fingerprint`, `alpn`, `allowInsecure`) for `security=tls`, or `realitySettings` for `security=reality`.
+- `buildVisionOutbound` renamed to `buildTcpOutbound` to reflect that it handles all TCP transports, not just Vision.
+- Flow defaulting fixed: previously always set `flow = "xtls-rprx-vision"` when empty. Now only defaults to Vision for REALITY links; plain TLS links keep `flow = ""`.
+- This enables support for additional VPN providers (e.g. services using standard VLESS+TLS without REALITY).
+
 ### ps output format (busybox on Keenetic)
 ```
 PID   USER     VSZ   STAT  COMMAND

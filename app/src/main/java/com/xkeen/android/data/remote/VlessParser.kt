@@ -37,6 +37,7 @@ class VlessParser {
 
         val params = parseQueryString(queryString)
         val transport = params["type"] ?: "tcp"
+        val security = params["security"] ?: "reality"
         val flow = params["flow"] ?: ""
         val tag = generateTag(name, address)
 
@@ -50,10 +51,15 @@ class VlessParser {
         }
         val useFragment = fragmentSettings != null
 
+        // Only default to Vision flow when using REALITY; plain TLS links may have no flow at all
+        val effectiveFlow = if (flow.isNotEmpty()) flow
+            else if (security == "reality") "xtls-rprx-vision"
+            else ""
+
         val outbound = if (transport == "xhttp") {
             buildXhttpOutbound(tag, address, port, uuid, params, useFragment)
         } else {
-            buildVisionOutbound(tag, address, port, uuid, params, flow.ifEmpty { "xtls-rprx-vision" }, useFragment)
+            buildTcpOutbound(tag, address, port, uuid, params, effectiveFlow, useFragment)
         }
 
         return ParsedVless(
@@ -127,13 +133,30 @@ class VlessParser {
             }
             putJsonObject("streamSettings") {
                 put("network", "xhttp")
-                put("security", "reality")
-                putJsonObject("realitySettings") {
-                    put("publicKey", pbk)
-                    put("fingerprint", fp)
-                    put("serverName", sni)
-                    put("shortId", sid)
-                    put("spiderX", spx)
+                val security = params["security"] ?: "reality"
+                put("security", security)
+                if (security == "tls") {
+                    putJsonObject("tlsSettings") {
+                        put("serverName", sni)
+                        put("fingerprint", fp)
+                        val alpn = params["alpn"]
+                        if (!alpn.isNullOrEmpty()) {
+                            putJsonArray("alpn") {
+                                alpn.split(",").forEach { add(it.trim()) }
+                            }
+                        }
+                        if (params["allowinsecure"] == "1" || params["allowInsecure"] == "1") {
+                            put("allowInsecure", true)
+                        }
+                    }
+                } else {
+                    putJsonObject("realitySettings") {
+                        put("publicKey", pbk)
+                        put("fingerprint", fp)
+                        put("serverName", sni)
+                        put("shortId", sid)
+                        put("spiderX", spx)
+                    }
                 }
                 putJsonObject("xhttpSettings") {
                     put("mode", mode)
@@ -161,11 +184,10 @@ class VlessParser {
         }
     }
 
-    private fun buildVisionOutbound(tag: String, address: String, port: Int, uuid: String, params: Map<String, String>, flow: String, useFragment: Boolean = false): JsonObject {
+    private fun buildTcpOutbound(tag: String, address: String, port: Int, uuid: String, params: Map<String, String>, flow: String, useFragment: Boolean = false): JsonObject {
+        val security = params["security"] ?: "reality"
         val sni = params["sni"] ?: address
         val fp = params["fp"] ?: "chrome"
-        val pbk = params["pbk"] ?: ""
-        val sid = params["sid"] ?: ""
 
         return buildJsonObject {
             put("tag", tag)
@@ -188,13 +210,31 @@ class VlessParser {
             }
             putJsonObject("streamSettings") {
                 put("network", "tcp")
-                put("security", "reality")
-                putJsonObject("realitySettings") {
-                    put("publicKey", pbk)
-                    put("fingerprint", fp)
-                    put("serverName", sni)
-                    put("shortId", sid)
-                    put("spiderX", "")
+                put("security", security)
+                if (security == "tls") {
+                    putJsonObject("tlsSettings") {
+                        put("serverName", sni)
+                        put("fingerprint", fp)
+                        val alpn = params["alpn"]
+                        if (!alpn.isNullOrEmpty()) {
+                            putJsonArray("alpn") {
+                                alpn.split(",").forEach { add(it.trim()) }
+                            }
+                        }
+                        if (params["allowinsecure"] == "1" || params["allowInsecure"] == "1") {
+                            put("allowInsecure", true)
+                        }
+                    }
+                } else {
+                    val pbk = params["pbk"] ?: ""
+                    val sid = params["sid"] ?: ""
+                    putJsonObject("realitySettings") {
+                        put("publicKey", pbk)
+                        put("fingerprint", fp)
+                        put("serverName", sni)
+                        put("shortId", sid)
+                        put("spiderX", "")
+                    }
                 }
                 if (useFragment) {
                     putJsonObject("sockopt") {
