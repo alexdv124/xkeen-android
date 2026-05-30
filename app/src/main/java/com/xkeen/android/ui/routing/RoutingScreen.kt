@@ -27,6 +27,7 @@ fun RoutingScreen(sshClient: SshClient?) {
     var message by remember { mutableStateOf<String?>(null) }
     var showCustomRouteDialog by remember { mutableStateOf(false) }
     var deviceToRoute by remember { mutableStateOf<com.xkeen.android.data.remote.NetworkDevice?>(null) }
+    var activeCore by remember { mutableStateOf(ProxyCore.XRAY) }
 
     fun refresh() {
         if (sshClient == null) return
@@ -34,6 +35,7 @@ fun RoutingScreen(sshClient: SshClient?) {
         scope.launch {
             try {
                 val config = XrayConfigRemote(sshClient)
+                activeCore = try { RouterCommands(sshClient).getCoreState().activeCore } catch (_: Exception) { ProxyCore.XRAY }
                 routingConfig = config.getRoutingConfig()
                 proxies = config.getProxyList()
             } catch (e: Exception) { message = e.message }
@@ -238,6 +240,19 @@ fun RoutingScreen(sshClient: SshClient?) {
 
         // === BALANCER MODE ===
         if (routingConfig.preset != RoutingPreset.ALL_DIRECT) {
+            if (activeCore == ProxyCore.MIHOMO) {
+                Card(
+                    Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer)
+                ) {
+                    Column(Modifier.padding(16.dp)) {
+                        Text("Балансировка (Mihomo)", fontWeight = FontWeight.SemiBold)
+                        Text("Выбор сервера и режим Авто/Ручной — на вкладке «Серверы».",
+                            style = MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }
+            if (activeCore != ProxyCore.MIHOMO) {
             Text("Балансировка", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
 
             Card(Modifier.fillMaxWidth()) {
@@ -343,6 +358,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                         }
                     }
                 }
+            }
             }
 
             HorizontalDivider(Modifier.padding(vertical = 4.dp))

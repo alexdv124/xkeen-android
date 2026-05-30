@@ -2,11 +2,14 @@ package com.xkeen.android.data.remote
 
 import com.xkeen.android.data.ssh.SshClient
 import com.xkeen.android.domain.model.ConfigTestResult
+import com.xkeen.android.domain.model.CoreState
+import com.xkeen.android.domain.model.CoreSwitchResult
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import com.xkeen.android.domain.model.ObservatoryState
+import com.xkeen.android.domain.model.ProxyCore
 import com.xkeen.android.domain.model.RouterStatus
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -14,6 +17,8 @@ import java.util.Locale
 
 object Paths {
     const val CONFIGS_DIR = "/opt/etc/xray/configs"
+    const val MIHOMO_DIR = "/opt/etc/mihomo"
+    const val MIHOMO_CONFIG = "$MIHOMO_DIR/config.yaml"
     const val LOG_DIR = "/opt/var/log/xray"
     const val OUTBOUNDS = "$CONFIGS_DIR/04_outbounds.json"
     const val ROUTING = "$CONFIGS_DIR/05_routing.json"
@@ -22,19 +27,85 @@ object Paths {
 
 class RouterCommands(private val ssh: SshClient) {
 
+    private data class ProcessInfo(
+        val running: Boolean = false,
+        val pid: String = "",
+        val mem: String = ""
+    )
+
+    private fun parseProcessInfo(out: String): ProcessInfo {
+        val line = out.lineSequence().firstOrNull { it.isNotBlank() } ?: return ProcessInfo()
+        val parts = line.trim().split(Regex("\\s+"))
+        return ProcessInfo(
+            running = true,
+            pid = parts.getOrElse(0) { "" },
+            mem = parts.getOrElse(2) { "" }
+        )
+    }
+
+    private suspend fun getProcessInfo(processName: String): ProcessInfo {
+        val out = ssh.exec(
+            "pid=\"\$(pidof $processName 2>/dev/null | cut -d' ' -f1)\"; " +
+                "if [ -n \"\$pid\" ]; then " +
+                "line=\"\$(ps | grep \"^ *\$pid \")\"; " +
+                "[ -n \"\$line\" ] && echo \"\$line\" || echo \"\$pid\"; " +
+                "fi"
+        ).stdout
+        return parseProcessInfo(out)
+    }
+
+    private fun cleanTerminalOutput(out: String): String {
+        return out
+            .replace(Regex("${27.toChar()}\\[[0-?]*[ -/]*[@-~]"), "")
+            .replace(Regex("\\[(?:\\d{1,2})?m"), "")
+            .replace("[H[J", "")
+            .trim()
+    }
+
+    private suspend fun waitForCore(target: ProxyCore, attempts: Int = 10): CoreState {
+        var latest = getCoreState(withConfigTests = false)
+        repeat(attempts) {
+            val running = when (target) {
+                ProxyCore.XRAY -> latest.xrayRunning
+                ProxyCore.MIHOMO -> latest.mihomoRunning
+                ProxyCore.UNKNOWN -> latest.activeRunning
+            }
+            if (latest.activeCore == target && running) return latest
+            delay(2500)
+            latest = getCoreState(withConfigTests = false)
+        }
+        return latest
+    }
+
+    private suspend fun startXkeenQuietly(): String {
+        return ssh.exec("fd_out=true /opt/etc/init.d/S99xkeen start on 2>&1", timeout = 30000).stdout
+    }
+
+    private suspend fun stopXkeenQuietly(): String {
+        return ssh.exec("/opt/etc/init.d/S99xkeen stop 2>&1", timeout = 30000).stdout
+    }
+
     suspend fun getStatus(): RouterStatus {
         var status = RouterStatus()
 
-        // Xray process
-        val psOut = ssh.exec("ps | grep xray | grep -v grep").stdout.trim()
-        if (psOut.isNotEmpty()) {
-            val parts = psOut.split(Regex("\\s+"))
-            status = status.copy(
-                xrayRunning = true,
-                xrayPid = parts.getOrElse(0) { "" },
-                xrayMem = parts.getOrElse(2) { "" }
-            )
+        val coreState = getCoreState()
+        val activeInfo = when (coreState.activeCore) {
+            ProxyCore.XRAY -> ProcessInfo(coreState.xrayRunning, coreState.xrayPid, coreState.xrayMem)
+            ProxyCore.MIHOMO -> ProcessInfo(coreState.mihomoRunning, coreState.mihomoPid, coreState.mihomoMem)
+            ProxyCore.UNKNOWN -> {
+                if (coreState.xrayRunning) ProcessInfo(true, coreState.xrayPid, coreState.xrayMem)
+                else ProcessInfo(coreState.mihomoRunning, coreState.mihomoPid, coreState.mihomoMem)
+            }
         }
+        status = status.copy(
+            xrayRunning = coreState.xrayRunning,
+            xrayPid = coreState.xrayPid,
+            xrayMem = coreState.xrayMem,
+            activeCore = coreState.activeCore,
+            coreRunning = activeInfo.running,
+            corePid = activeInfo.pid,
+            coreMem = activeInfo.mem
+        )
 
         // Memory
         val memOut = ssh.exec("free").stdout
@@ -73,6 +144,271 @@ class RouterCommands(private val ssh: SshClient) {
         status = status.copy(xkeenVersion = verOut)
 
         return status
+    }
+
+    suspend fun getCoreState(withConfigTests: Boolean = false): CoreState {
+        val statusText = ssh.exec("xkeen -status 2>&1 || true").stdout.trim()
+        val configuredCoreText = ssh.exec(
+            "grep -m1 '^name_client=' /opt/etc/init.d/S99xkeen 2>/dev/null | cut -d'\"' -f2 || true"
+        ).stdout.trim()
+        val configuredCore = ProxyCore.fromCliName(configuredCoreText)
+        val activeCore = when {
+            statusText.contains("mihomo", ignoreCase = true) -> ProxyCore.MIHOMO
+            statusText.contains("xray", ignoreCase = true) -> ProxyCore.XRAY
+            configuredCore != ProxyCore.UNKNOWN -> configuredCore
+            else -> ProxyCore.UNKNOWN
+        }
+
+        val xrayInstalled = ssh.exec("command -v xray 2>/dev/null || true").stdout.trim().isNotEmpty()
+        val mihomoInstalled = ssh.exec("command -v mihomo 2>/dev/null || true").stdout.trim().isNotEmpty()
+
+        val xrayInfo = getProcessInfo("xray")
+        val mihomoInfo = getProcessInfo("mihomo")
+
+        val xrayVersion = if (xrayInstalled) {
+            ssh.exec("xray version 2>&1 | head -1 || true").stdout.trim()
+        } else ""
+        val mihomoVersion = if (mihomoInstalled) {
+            ssh.exec("(mihomo -v 2>&1 || mihomo version 2>&1) | head -1 || true").stdout.trim()
+        } else ""
+
+        val xrayTest = if (withConfigTests && xrayInstalled) testCoreConfig(ProxyCore.XRAY) else null
+        val mihomoTest = if (withConfigTests && mihomoInstalled) testCoreConfig(ProxyCore.MIHOMO) else null
+
+        return CoreState(
+            activeCore = activeCore,
+            xrayInstalled = xrayInstalled,
+            mihomoInstalled = mihomoInstalled,
+            xrayRunning = xrayInfo.running,
+            mihomoRunning = mihomoInfo.running,
+            xrayVersion = xrayVersion,
+            mihomoVersion = mihomoVersion,
+            xrayPid = xrayInfo.pid,
+            mihomoPid = mihomoInfo.pid,
+            xrayMem = xrayInfo.mem,
+            mihomoMem = mihomoInfo.mem,
+            xrayConfigOk = xrayTest?.ok,
+            mihomoConfigOk = mihomoTest?.ok,
+            xrayConfigDetail = xrayTest?.output?.lines()?.lastOrNull { it.isNotBlank() } ?: "",
+            mihomoConfigDetail = mihomoTest?.output?.lines()?.lastOrNull { it.isNotBlank() } ?: "",
+            mihomoConfigPath = findMihomoConfigPath(),
+            statusText = statusText
+        )
+    }
+
+    suspend fun findMihomoConfigPath(): String {
+        return ssh.exec(
+            "for f in " +
+                "/opt/etc/mihomo/config.yaml /opt/etc/mihomo/config.yml " +
+                "/opt/etc/mihomo/*.yaml /opt/etc/mihomo/*.yml " +
+                "/opt/etc/xkeen/mihomo.yaml /opt/etc/xkeen/mihomo.yml; do " +
+                "[ -f \"\$f\" ] && echo \"\$f\" && break; " +
+            "done 2>/dev/null"
+        ).stdout.trim().lineSequence().firstOrNull().orEmpty()
+    }
+
+    suspend fun testCoreConfig(core: ProxyCore): ConfigTestResult {
+        return when (core) {
+            ProxyCore.XRAY -> testConfig()
+            ProxyCore.MIHOMO -> {
+                val configPath = findMihomoConfigPath()
+                if (configPath.isBlank()) {
+                    ConfigTestResult(false, "Конфиг Mihomo не найден в /opt/etc/mihomo")
+                } else {
+                    val result = ssh.exec(
+                        "mihomo -t -f \"$configPath\" 2>&1",
+                        timeout = 30000
+                    )
+                    val out = result.stdout
+                    // mihomo -t exits 0 on success. Trust the exit code; only fall back to
+                    // string-matching when the code is unknown (-1, e.g. the call timed out).
+                    val ok = when {
+                        result.exitCode == 0 -> true
+                        result.exitCode > 0 -> false
+                        else -> "test is successful" in out.lowercase()
+                    }
+                    ConfigTestResult(ok, out)
+                }
+            }
+            ProxyCore.UNKNOWN -> ConfigTestResult(false, "Активное ядро не определено")
+        }
+    }
+
+    suspend fun backupCoreConfigs(): String {
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val backupDir = "/opt/etc/xkeen/android-backups/$timestamp"
+        ssh.exec(
+            "mkdir -p \"$backupDir\"; " +
+                "if [ -d ${Paths.CONFIGS_DIR} ]; then mkdir -p \"$backupDir/xray\"; cp -a ${Paths.CONFIGS_DIR}/*.json \"$backupDir/xray/\" 2>/dev/null; fi; " +
+                "if [ -d /opt/etc/mihomo ]; then mkdir -p \"$backupDir/mihomo\"; cp -a /opt/etc/mihomo/. \"$backupDir/mihomo/\" 2>/dev/null; fi; " +
+                "if [ -f /opt/etc/ndm/netfilter.d/xkeen-quic-reject.sh ]; then mkdir -p \"$backupDir/netfilter.d\"; cp -a /opt/etc/ndm/netfilter.d/xkeen-quic-reject.sh \"$backupDir/netfilter.d/\"; fi; " +
+                "echo \"$backupDir\""
+        )
+        return backupDir
+    }
+
+    suspend fun installOrUpdateMihomo(): CoreSwitchResult {
+        val backupId = backupCoreConfigs()
+        val out = cleanTerminalOutput(
+            ssh.exec("printf '1\\n' | xkeen -um 2>&1", timeout = 240000).stdout
+        )
+        delay(1000)
+        val state = getCoreState(withConfigTests = false)
+        return if (state.mihomoInstalled) {
+            val configPath = findMihomoConfigPath()
+            if (configPath.isBlank()) {
+                val generated = generateMihomoConfigFromXray()
+                CoreSwitchResult(
+                    ok = generated.ok,
+                    message = "Mihomo установлен. ${generated.message}",
+                    backupId = generated.backupId.ifBlank { backupId },
+                    rolledBack = generated.rolledBack,
+                    detail = (out.takeLast(600) + "\n\n" + cleanTerminalOutput(generated.detail).takeLast(800)).trim()
+                )
+            } else {
+                CoreSwitchResult(true, "Mihomo установлен", backupId, detail = out.takeLast(1000))
+            }
+        } else {
+            CoreSwitchResult(false, "Mihomo не найден после установки", backupId, detail = out.takeLast(1000))
+        }
+    }
+
+    suspend fun generateMihomoConfigFromXray(): CoreSwitchResult {
+        val backupId = backupCoreConfigs()
+        val generated = try {
+            MihomoConfigRemote(ssh).writeFromXrayConfig()
+        } catch (e: Exception) {
+            return CoreSwitchResult(
+                ok = false,
+                message = "Не удалось собрать конфиг Mihomo",
+                backupId = backupId,
+                detail = e.message.orEmpty()
+            )
+        }
+
+        if (!generated.first) {
+            return CoreSwitchResult(false, generated.second, backupId)
+        }
+
+        val state = getCoreState(withConfigTests = false)
+        if (!state.mihomoInstalled) {
+            return CoreSwitchResult(
+                ok = true,
+                message = "Конфиг Mihomo собран; установите Mihomo, чтобы проверить",
+                backupId = backupId,
+                detail = generated.second
+            )
+        }
+
+        val test = testCoreConfig(ProxyCore.MIHOMO)
+        if (test.ok) {
+            var msg = "Конфиг Mihomo собран и проверен"
+            if (state.mihomoRunning) {
+                val path = findMihomoConfigPath()
+                val reloaded = path.isNotBlank() &&
+                    try { MihomoApi(ssh).reloadConfig(path) } catch (_: Exception) { false }
+                msg += if (reloaded) "; применён на лету" else "; перезапустите прокси, чтобы применить"
+            }
+            return CoreSwitchResult(true, msg, backupId, detail = test.output.takeLast(800))
+        }
+
+        restoreMihomoConfigFromBackup(backupId)
+        return CoreSwitchResult(
+            ok = false,
+            message = "Сгенерированный конфиг Mihomo не прошел проверку",
+            backupId = backupId,
+            rolledBack = true,
+            detail = test.output.takeLast(1200)
+        )
+    }
+
+    private suspend fun restoreMihomoConfigFromBackup(backupDir: String) {
+        ssh.exec(
+            "if [ -d \"$backupDir/mihomo\" ]; then " +
+                "mkdir -p ${Paths.MIHOMO_DIR}; cp -a \"$backupDir/mihomo/.\" ${Paths.MIHOMO_DIR}/; " +
+            "else rm -f ${Paths.MIHOMO_CONFIG}; fi"
+        )
+    }
+
+    suspend fun switchCore(target: ProxyCore): CoreSwitchResult {
+        if (target == ProxyCore.UNKNOWN) {
+            return CoreSwitchResult(false, "Целевое ядро не определено")
+        }
+
+        val before = getCoreState(withConfigTests = false)
+        val backupId = backupCoreConfigs()
+
+        val targetInstalled = when (target) {
+            ProxyCore.XRAY -> before.xrayInstalled
+            ProxyCore.MIHOMO -> before.mihomoInstalled
+            ProxyCore.UNKNOWN -> false
+        }
+        if (!targetInstalled) {
+            return CoreSwitchResult(false, "${target.title} не установлен", backupId)
+        }
+        if (target == ProxyCore.MIHOMO) {
+            val yqInstalled = ssh.exec("command -v yq 2>/dev/null || true").stdout.trim().isNotEmpty()
+            if (!yqInstalled) {
+                return CoreSwitchResult(false, "Для Mihomo не найден yq. Повторите установку Mihomo", backupId)
+            }
+        }
+
+        val configTest = testCoreConfig(target)
+        if (!configTest.ok) {
+            return CoreSwitchResult(
+                ok = false,
+                message = "Конфиг ${target.title} не прошел проверку",
+                backupId = backupId,
+                detail = configTest.output.takeLast(1200)
+            )
+        }
+
+        val switchCommand = when (target) {
+            ProxyCore.XRAY -> "xkeen -xray"
+            ProxyCore.MIHOMO -> "xkeen -mihomo"
+            ProxyCore.UNKNOWN -> ""
+        }
+        val switchOut = ssh.exec("$switchCommand 2>&1", timeout = 90000).stdout
+        val startOut = startXkeenQuietly()
+        delay(1500)
+
+        val after = waitForCore(target)
+        val targetRunning = when (target) {
+            ProxyCore.XRAY -> after.xrayRunning
+            ProxyCore.MIHOMO -> after.mihomoRunning
+            ProxyCore.UNKNOWN -> false
+        }
+        if (after.activeCore == target && targetRunning) {
+            return CoreSwitchResult(
+                ok = true,
+                message = "Переключено на ${target.title}",
+                backupId = backupId,
+                detail = (switchOut + "\n--- start ---\n" + startOut).takeLast(1600)
+            )
+        }
+
+        val rollbackCore = if (before.activeCore != ProxyCore.UNKNOWN) before.activeCore else ProxyCore.XRAY
+        val stopOut = stopXkeenQuietly()
+        delay(1500)
+        val rollbackCommand = when (rollbackCore) {
+            ProxyCore.XRAY -> "xkeen -xray"
+            ProxyCore.MIHOMO -> "xkeen -mihomo"
+            ProxyCore.UNKNOWN -> "xkeen -xray"
+        }
+        val rollbackOut = ssh.exec("$rollbackCommand 2>&1", timeout = 90000).stdout
+        delay(1500)
+        return CoreSwitchResult(
+            ok = false,
+            message = "Переключение не удалось; прокси остановлен, ядро возвращено на ${rollbackCore.title}",
+            backupId = backupId,
+            rolledBack = true,
+            detail = (
+                switchOut +
+                    "\n--- start ---\n" + startOut +
+                    "\n--- stop for direct internet ---\n" + stopOut +
+                    "\n--- rollback core ---\n" + rollbackOut
+            ).takeLast(2200)
+        )
     }
 
     suspend fun getObservatoryState(): ObservatoryState {
@@ -153,13 +489,28 @@ class RouterCommands(private val ssh: SshClient) {
     }
 
     suspend fun restartXkeen(): Pair<Boolean, String> {
+        // In Mihomo mode the UI has just edited the Xray JSON; rebuild the Mihomo config
+        // from it and hot-reload instead of a full core restart. The manual server choice
+        // survives the rebuild because the config keeps `store-selected: true` (cache.db).
+        val core = try { getCoreState().activeCore } catch (_: Exception) { ProxyCore.UNKNOWN }
+        if (core == ProxyCore.MIHOMO) {
+            val gen = generateMihomoConfigFromXray()
+            return Pair(gen.ok, gen.message)
+        }
+
         try {
             ssh.exec("/opt/etc/init.d/S99xkeen restart 2>&1", timeout = 30000)
         } catch (_: Exception) { }
 
         delay(4000)
-        val out = ssh.exec("ps | grep xray | grep -v grep").stdout.trim()
-        return Pair(out.isNotEmpty(), out)
+        val state = getCoreState()
+        val running = state.activeRunning
+        val detail = when (state.activeCore) {
+            ProxyCore.XRAY -> "xray ${state.xrayPid} ${state.xrayMem}".trim()
+            ProxyCore.MIHOMO -> "mihomo ${state.mihomoPid} ${state.mihomoMem}".trim()
+            ProxyCore.UNKNOWN -> state.statusText
+        }
+        return Pair(running, detail)
     }
 
     // ========== QUIC fast-reject via iptables ==========
@@ -229,17 +580,23 @@ fi
 
     suspend fun runDiagnostics(): DiagnosticReport {
         val checks = mutableListOf<DiagnosticCheck>()
+        val coreState = getCoreState(withConfigTests = false)
 
-        // 1. Xray running?
-        val ps = ssh.exec("ps | grep xray | grep -v grep").stdout.trim()
+        // 1. Active core process
+        val activePid = when (coreState.activeCore) {
+            ProxyCore.XRAY -> coreState.xrayPid
+            ProxyCore.MIHOMO -> coreState.mihomoPid
+            ProxyCore.UNKNOWN -> ""
+        }
+        val ps = if (coreState.activeRunning) activePid else ""
         checks.add(DiagnosticCheck(
-            "Xray процесс",
+            "${coreState.activeTitle} процесс",
             if (ps.isNotEmpty()) DiagStatus.OK else DiagStatus.FAIL,
             if (ps.isNotEmpty()) "PID: ${ps.split(Regex("\\s+")).firstOrNull()}" else "Не запущен"
         ))
 
         // 2. Config test
-        val test = testConfig()
+        val test = testCoreConfig(coreState.activeCore)
         checks.add(DiagnosticCheck(
             "Конфигурация",
             if (test.ok) DiagStatus.OK else DiagStatus.FAIL,
@@ -255,7 +612,7 @@ fi
         } catch (_: Exception) { emptyList() }
 
         val obs = try { getObservatoryState() } catch (_: Exception) { ObservatoryState() }
-        if (proxyTags.isNotEmpty()) {
+        if (coreState.activeCore == ProxyCore.XRAY && proxyTags.isNotEmpty()) {
             val totalProxies = proxyTags.size
             val failedCount = obs.failedProxies.size
             checks.add(DiagnosticCheck(
@@ -269,6 +626,12 @@ fi
                     failedCount == 0 -> "Все $totalProxies работают: ${proxyTags.joinToString(", ")}"
                     else -> "$failedCount из $totalProxies с ошибками: ${obs.failedProxies.joinToString(", ")}"
                 }
+            ))
+        } else if (coreState.activeCore == ProxyCore.MIHOMO) {
+            checks.add(DiagnosticCheck(
+                "Прокси-серверы",
+                DiagStatus.WARN,
+                "Проверка серверов выполняется самим Mihomo"
             ))
         }
 

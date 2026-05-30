@@ -61,9 +61,13 @@ class SshClient(private val profile: RouterProfile) {
 
             val out = stdout.toString(Charsets.UTF_8.name())
             val err = stderr.toString(Charsets.UTF_8.name())
+            // Capture the exit status before disconnecting. JSch returns -1 until the
+            // channel has actually closed, so a command that timed out (loop exited on
+            // the deadline, not on close) reports -1 = "unknown" rather than a fake 0.
+            val code = if (channel.isClosed) channel.exitStatus else -1
             channel.disconnect()
 
-            SshResult(out, err)
+            SshResult(out, err, code)
         }
     }
 
@@ -102,5 +106,6 @@ class SshClient(private val profile: RouterProfile) {
 
 data class SshResult(
     val stdout: String,
-    val stderr: String
+    val stderr: String,
+    val exitCode: Int = -1
 )

@@ -1,5 +1,6 @@
 package com.xkeen.android.ui.proxies
 
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -11,11 +12,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.xkeen.android.data.remote.MihomoApi
 import com.xkeen.android.data.remote.RouterCommands
 import com.xkeen.android.data.remote.VlessParser
 import com.xkeen.android.data.remote.XrayConfigRemote
 import com.xkeen.android.data.ssh.SshClient
 import com.xkeen.android.domain.model.ConfigState
+import com.xkeen.android.domain.model.ProxyCore
 import com.xkeen.android.domain.model.ProxyInfo
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
@@ -32,25 +35,56 @@ fun ProxiesScreen(sshClient: SshClient?) {
     var configState by remember { mutableStateOf(ConfigState.Empty) }
     var showFailoverDialog by remember { mutableStateOf(false) }
     var pendingNewTag by remember { mutableStateOf("") }
+    var activeCore by remember { mutableStateOf(ProxyCore.XRAY) }
+    var mihomoSelectable by remember { mutableStateOf(false) }
 
     fun refresh() {
         if (sshClient == null) return
         loading = true; error = null
         scope.launch {
             try {
-                val config = XrayConfigRemote(sshClient)
                 val cmds = RouterCommands(sshClient)
-                configState = config.detectConfigState()
-                val list = config.getProxyList()
-                val obs = try { cmds.getObservatoryState() } catch (_: Exception) {
-                    com.xkeen.android.domain.model.ObservatoryState()
-                }
-                proxies = list.map { p ->
-                    p.copy(
-                        failed = p.tag in obs.failedProxies,
-                        requests = obs.usage[p.tag] ?: 0,
-                        selected = p.tag == obs.selected
-                    )
+                val core = try { cmds.getCoreState().activeCore } catch (_: Exception) { ProxyCore.XRAY }
+                activeCore = core
+                if (core == ProxyCore.MIHOMO) {
+                    configState = ConfigState.Empty
+                    val api = MihomoApi(sshClient)
+                    if (!api.isAvailable()) {
+                        error = "На роутере нет curl — установите: opkg install curl"
+                        proxies = emptyList(); mihomoSelectable = false
+                    } else {
+                        val nodes = api.getProxies()
+                        val selector = nodes["PROXY"]?.takeIf { it.isGroup }
+                        val now = selector?.now ?: ""
+                        mihomoSelectable = selector != null
+                        val servers = nodes.values.filter {
+                            it.type.equals("Vless", true) || it.name.startsWith("proxy-")
+                        }
+                        proxies = buildList {
+                            if (selector != null && "AUTO" in selector.all) {
+                                add(ProxyInfo("AUTO", "авто по минимальной задержке", 0, "url-test",
+                                    selected = now == "AUTO"))
+                            }
+                            servers.forEach { n ->
+                                add(ProxyInfo(n.name, "", 0, n.type.lowercase(),
+                                    selected = n.name == now, delayMs = n.delayMs))
+                            }
+                        }
+                    }
+                } else {
+                    val config = XrayConfigRemote(sshClient)
+                    configState = config.detectConfigState()
+                    val list = config.getProxyList()
+                    val obs = try { cmds.getObservatoryState() } catch (_: Exception) {
+                        com.xkeen.android.domain.model.ObservatoryState()
+                    }
+                    proxies = list.map { p ->
+                        p.copy(
+                            failed = p.tag in obs.failedProxies,
+                            requests = obs.usage[p.tag] ?: 0,
+                            selected = p.tag == obs.selected
+                        )
+                    }
                 }
             } catch (e: Exception) { error = e.message }
             finally { loading = false }
@@ -62,7 +96,11 @@ fun ProxiesScreen(sshClient: SshClient?) {
     Scaffold(
         floatingActionButton = {
             if (sshClient != null) {
-                FloatingActionButton(onClick = { showAddSheet = true }) {
+                FloatingActionButton(onClick = {
+                    if (activeCore == ProxyCore.MIHOMO) {
+                        actionMessage = "Добавление серверов — в режиме Xray. Затем пересоберите конфиг Mihomo (Настройки → Ядро прокси)."
+                    } else showAddSheet = true
+                }) {
                     Icon(Icons.Default.Add, "Добавить сервер")
                 }
             }
@@ -101,6 +139,46 @@ fun ProxiesScreen(sshClient: SshClient?) {
                                 }
                             }
                         }
+                        if (activeCore == ProxyCore.MIHOMO) {
+                            item {
+                                Card(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = if (mihomoSelectable) MaterialTheme.colorScheme.secondaryContainer
+                                        else MaterialTheme.colorScheme.tertiaryContainer
+                                    )
+                                ) {
+                                    Column(Modifier.padding(16.dp)) {
+                                        Text("Ядро: Mihomo", fontWeight = FontWeight.SemiBold)
+                                        if (mihomoSelectable) {
+                                            Text(
+                                                "Нажмите на сервер, чтобы выбрать его вручную. AUTO — выбор по минимальной задержке.",
+                                                style = MaterialTheme.typography.bodySmall
+                                            )
+                                            Spacer(Modifier.height(8.dp))
+                                            OutlinedButton(
+                                                onClick = {
+                                                    scope.launch {
+                                                        loading = true
+                                                        try {
+                                                            MihomoApi(sshClient).testGroupDelay("PROXY")
+                                                            refresh()
+                                                        } catch (e: Exception) { actionMessage = e.message }
+                                                        finally { loading = false }
+                                                    }
+                                                },
+                                                enabled = !loading
+                                            ) { Text("Обновить задержки") }
+                                        } else {
+                                            Text(
+                                                "Текущий конфиг без селектора — ручной выбор недоступен. Соберите конфиг заново: Настройки → Ядро прокси → «Собрать конфиг Mihomo».",
+                                                style = MaterialTheme.typography.bodySmall
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         // Config state banner
                         if (configState.isSingleServer) {
                             item {
@@ -121,6 +199,21 @@ fun ProxiesScreen(sshClient: SshClient?) {
                         items(proxies) { proxy ->
                             ProxyCard(
                                 proxy = proxy,
+                                showDelete = activeCore != ProxyCore.MIHOMO,
+                                onClick = if (activeCore == ProxyCore.MIHOMO && mihomoSelectable) {
+                                    {
+                                        scope.launch {
+                                            loading = true
+                                            try {
+                                                val ok = MihomoApi(sshClient).select("PROXY", proxy.tag)
+                                                actionMessage = if (ok) "Выбран: ${proxy.tag}"
+                                                    else "Не удалось выбрать ${proxy.tag}"
+                                                refresh()
+                                            } catch (e: Exception) { actionMessage = e.message }
+                                            finally { loading = false }
+                                        }
+                                    }
+                                } else null,
                                 onDelete = {
                                     scope.launch {
                                         loading = true
@@ -287,11 +380,18 @@ fun ProxiesScreen(sshClient: SshClient?) {
 }
 
 @Composable
-fun ProxyCard(proxy: ProxyInfo, onDelete: () -> Unit) {
+fun ProxyCard(
+    proxy: ProxyInfo,
+    showDelete: Boolean = true,
+    onClick: (() -> Unit)? = null,
+    onDelete: () -> Unit
+) {
     var showDeleteConfirm by remember { mutableStateOf(false) }
 
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable { onClick.invoke() } else Modifier),
         colors = CardDefaults.cardColors(
             containerColor = when {
                 proxy.selected -> MaterialTheme.colorScheme.primaryContainer
@@ -310,6 +410,11 @@ fun ProxyCard(proxy: ProxyInfo, onDelete: () -> Unit) {
                 Spacer(Modifier.width(8.dp))
                 Text(proxy.tag, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.weight(1f))
+                if (proxy.delayMs > 0) {
+                    Text("${proxy.delayMs} ms", style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.width(8.dp))
+                }
                 if (proxy.selected) {
                     Surface(shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.primary) {
                         Text("ACTIVE", Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
@@ -317,12 +422,19 @@ fun ProxyCard(proxy: ProxyInfo, onDelete: () -> Unit) {
                             style = MaterialTheme.typography.labelSmall)
                     }
                 }
-                IconButton(onClick = { showDeleteConfirm = true }, Modifier.size(32.dp)) {
-                    Icon(Icons.Default.DeleteOutline, "Удалить", Modifier.size(18.dp))
+                if (showDelete) {
+                    IconButton(onClick = { showDeleteConfirm = true }, Modifier.size(32.dp)) {
+                        Icon(Icons.Default.DeleteOutline, "Удалить", Modifier.size(18.dp))
+                    }
                 }
             }
-            Spacer(Modifier.height(4.dp))
-            Text("${proxy.address}:${proxy.port}", style = MaterialTheme.typography.bodySmall)
+            if (proxy.address.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    if (proxy.port > 0) "${proxy.address}:${proxy.port}" else proxy.address,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(proxy.transport, style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)

@@ -144,41 +144,41 @@ fun DashboardScreen(sshClient: SshClient?) {
             }
 
             status?.let { s ->
-                // Xray + External IP
+                // Active proxy core + External IP
                 Card(
                     Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(
-                        containerColor = if (s.xrayRunning) MaterialTheme.colorScheme.primaryContainer
+                        containerColor = if (s.coreRunning) MaterialTheme.colorScheme.primaryContainer
                         else MaterialTheme.colorScheme.errorContainer
                     )
                 ) {
                     Column(Modifier.padding(16.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(Icons.Default.Shield, null, Modifier.size(24.dp),
-                                tint = if (s.xrayRunning) MaterialTheme.colorScheme.primary
+                                tint = if (s.coreRunning) MaterialTheme.colorScheme.primary
                                 else MaterialTheme.colorScheme.error)
                             Spacer(Modifier.width(8.dp))
-                            Text("Xray", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                            Text(s.activeCore.title, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
                             Spacer(Modifier.weight(1f))
                             Surface(
                                 shape = MaterialTheme.shapes.small,
-                                color = if (s.xrayRunning) MaterialTheme.colorScheme.primary
+                                color = if (s.coreRunning) MaterialTheme.colorScheme.primary
                                 else MaterialTheme.colorScheme.error
                             ) {
                                 Text(
-                                    if (s.xrayRunning) "RUNNING" else "STOPPED",
+                                    if (s.coreRunning) "RUNNING" else "STOPPED",
                                     Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                                    color = if (s.xrayRunning) MaterialTheme.colorScheme.onPrimary
+                                    color = if (s.coreRunning) MaterialTheme.colorScheme.onPrimary
                                     else MaterialTheme.colorScheme.onError,
                                     style = MaterialTheme.typography.labelSmall
                                 )
                             }
                         }
-                        if (s.xrayRunning) {
+                        if (s.coreRunning) {
                             Row(Modifier.fillMaxWidth().padding(top = 8.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text("PID: ${s.xrayPid}", style = MaterialTheme.typography.bodySmall)
-                                Text("RAM: ${s.xrayMem}", style = MaterialTheme.typography.bodySmall)
+                                Text("PID: ${s.corePid}", style = MaterialTheme.typography.bodySmall)
+                                Text("RAM: ${s.coreMem}", style = MaterialTheme.typography.bodySmall)
                             }
                         }
                         if (s.xkeenVersion.isNotEmpty()) {

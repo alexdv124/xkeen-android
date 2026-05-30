@@ -3,6 +3,8 @@ package com.xkeen.android.ui.settings
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -15,6 +17,9 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.xkeen.android.data.remote.RouterCommands
 import com.xkeen.android.data.ssh.SshClient
+import com.xkeen.android.domain.model.CoreState
+import com.xkeen.android.domain.model.CoreSwitchResult
+import com.xkeen.android.domain.model.ProxyCore
 import com.xkeen.android.domain.model.RouterProfile
 import kotlinx.coroutines.launch
 
@@ -33,6 +38,7 @@ fun SettingsScreen(
     var editingProfile by remember { mutableStateOf<RouterProfile?>(null) }
     var showBackups by remember { mutableStateOf(false) }
     var showCopyDialog by remember { mutableStateOf(false) }
+    var showCoreDialog by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var loading by remember { mutableStateOf(false) }
 
@@ -114,6 +120,31 @@ fun SettingsScreen(
             item {
                 Text("Инструменты", style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(bottom = 4.dp))
+            }
+
+            // Proxy core
+            item {
+                Card(
+                    onClick = {
+                        if (activeSshClient == null) {
+                            message = "Подключитесь к роутеру"
+                            return@Card
+                        }
+                        showCoreDialog = true
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Tune, null, Modifier.size(24.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("Ядро прокси", fontWeight = FontWeight.Medium)
+                            Text("Xray / Mihomo: проверка, backup и безопасное переключение",
+                                style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                }
             }
 
             // Backup
@@ -222,6 +253,14 @@ fun SettingsScreen(
         )
     }
 
+    if (showCoreDialog && activeSshClient != null) {
+        CoreManagementDialog(
+            sshClient = activeSshClient,
+            onMessage = { message = it },
+            onDismiss = { showCoreDialog = false }
+        )
+    }
+
     if (showCopyDialog) {
         CopyConfigDialog(
             profiles = profiles,
@@ -262,6 +301,235 @@ fun SettingsScreen(
             },
             onDismiss = { showCopyDialog = false }
         )
+    }
+}
+
+@Composable
+fun CoreManagementDialog(
+    sshClient: SshClient,
+    onMessage: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    var state by remember { mutableStateOf<CoreState?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    var actionText by remember { mutableStateOf<String?>(null) }
+
+    fun refresh(withTests: Boolean = true) {
+        loading = true
+        scope.launch {
+            try {
+                state = RouterCommands(sshClient).getCoreState(withConfigTests = withTests)
+            } catch (e: Exception) {
+                actionText = e.message
+            } finally {
+                loading = false
+            }
+        }
+    }
+
+    fun runCoreAction(action: suspend (RouterCommands) -> String) {
+        loading = true
+        scope.launch {
+            try {
+                val msg = action(RouterCommands(sshClient))
+                actionText = msg
+                onMessage(msg)
+                state = RouterCommands(sshClient).getCoreState(withConfigTests = true)
+            } catch (e: Exception) {
+                actionText = e.message
+            } finally {
+                loading = false
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) { refresh(withTests = true) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Default.Settings, null) },
+        title = { Text("Ядро прокси") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 520.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+
+                state?.let { s ->
+                    Text("Активно: ${s.activeTitle}", fontWeight = FontWeight.Bold)
+                    if (s.statusText.isNotBlank()) {
+                        Text(s.statusText, style = MaterialTheme.typography.bodySmall)
+                    }
+
+                    CoreStatusLine(
+                        title = "Xray",
+                        installed = s.xrayInstalled,
+                        running = s.xrayRunning,
+                        pid = s.xrayPid,
+                        version = s.xrayVersion,
+                        configOk = s.xrayConfigOk,
+                        configDetail = s.xrayConfigDetail
+                    )
+                    CoreStatusLine(
+                        title = "Mihomo",
+                        installed = s.mihomoInstalled,
+                        running = s.mihomoRunning,
+                        pid = s.mihomoPid,
+                        version = s.mihomoVersion,
+                        configOk = s.mihomoConfigOk,
+                        configDetail = if (s.mihomoConfigPath.isBlank()) {
+                            s.mihomoConfigDetail.ifBlank { "Конфиг не найден" }
+                        } else {
+                            "${s.mihomoConfigPath}\n${s.mihomoConfigDetail}".trim()
+                        }
+                    )
+
+                    Text(
+                        "Перед переключением приложение делает backup, проверяет конфиг целевого ядра и откатывается на прежнее ядро, если процесс не поднялся.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = { refresh(withTests = true) },
+                            enabled = !loading,
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Проверить") }
+                        Button(
+                            onClick = {
+                                runCoreAction { cmds ->
+                                    cmds.installOrUpdateMihomo().toUiMessage()
+                                }
+                            },
+                            enabled = !loading,
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Установить Mihomo") }
+                        OutlinedButton(
+                            onClick = {
+                                runCoreAction { cmds ->
+                                    cmds.generateMihomoConfigFromXray().toUiMessage()
+                                }
+                            },
+                            enabled = !loading,
+                            modifier = Modifier.fillMaxWidth()
+                        ) { Text("Собрать конфиг Mihomo") }
+                    }
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            modifier = Modifier.weight(1f),
+                            onClick = {
+                                runCoreAction { cmds ->
+                                    cmds.switchCore(ProxyCore.MIHOMO).toUiMessage()
+                                }
+                            },
+                            enabled = !loading &&
+                                s.mihomoInstalled &&
+                                s.mihomoConfigOk == true &&
+                                (s.activeCore != ProxyCore.MIHOMO || !s.mihomoRunning)
+                        ) { Text("На Mihomo") }
+                        OutlinedButton(
+                            modifier = Modifier.weight(1f),
+                            onClick = {
+                                runCoreAction { cmds ->
+                                    cmds.switchCore(ProxyCore.XRAY).toUiMessage()
+                                }
+                            },
+                            enabled = !loading &&
+                                s.xrayInstalled &&
+                                s.xrayConfigOk == true &&
+                                (s.activeCore != ProxyCore.XRAY || !s.xrayRunning)
+                        ) { Text("На Xray") }
+                    }
+                } ?: Text("Проверяю состояние...")
+
+                actionText?.let {
+                    HorizontalDivider()
+                    Text(it, style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss, enabled = !loading) { Text("Закрыть") }
+        }
+    )
+}
+
+private fun CoreSwitchResult.toUiMessage(): String = buildString {
+    append(message)
+    if (backupId.isNotBlank()) {
+        append("\nBackup: ").append(backupId)
+    }
+    if (rolledBack) {
+        append("\nОткат выполнен")
+    }
+    if (detail.isNotBlank()) {
+        append("\n\n").append(detail.cleanTerminalOutput().takeLast(800))
+    }
+}
+
+private fun String.cleanTerminalOutput(): String {
+    return replace(Regex("${27.toChar()}\\[[0-?]*[ -/]*[@-~]"), "")
+        .replace(Regex("\\[(?:\\d{1,2})?m"), "")
+        .replace("[H[J", "")
+        .trim()
+}
+
+@Composable
+private fun CoreStatusLine(
+    title: String,
+    installed: Boolean,
+    running: Boolean,
+    pid: String,
+    version: String,
+    configOk: Boolean?,
+    configDetail: String
+) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    if (installed) Icons.Default.CheckCircle else Icons.Default.Cancel,
+                    null,
+                    Modifier.size(18.dp),
+                    tint = if (installed) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(title, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                Text(if (running) "RUNNING" else "STOPPED", style = MaterialTheme.typography.labelSmall)
+            }
+            Text(
+                if (installed) "Установлен" else "Не установлен",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (running && pid.isNotBlank()) {
+                Text("PID: $pid", style = MaterialTheme.typography.bodySmall)
+            }
+            if (version.isNotBlank()) {
+                Text(version, style = MaterialTheme.typography.bodySmall)
+            }
+            configOk?.let {
+                Text(
+                    if (it) "Конфиг: OK" else "Конфиг: ошибка",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (it) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                )
+            }
+            if (configDetail.isNotBlank()) {
+                Text(
+                    configDetail.takeLast(220),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
     }
 }
 

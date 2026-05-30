@@ -13,6 +13,10 @@ data class RouterStatus(
     val xrayRunning: Boolean = false,
     val xrayPid: String = "",
     val xrayMem: String = "",
+    val activeCore: ProxyCore = ProxyCore.XRAY,
+    val coreRunning: Boolean = false,
+    val corePid: String = "",
+    val coreMem: String = "",
     val memTotal: Long = 0,
     val memUsed: Long = 0,
     val memFree: Long = 0,
@@ -21,6 +25,53 @@ data class RouterStatus(
     val uptime: String = "",
     val xkeenVersion: String = "",
     val observatory: ObservatoryState = ObservatoryState()
+)
+
+enum class ProxyCore(val cliName: String, val title: String) {
+    XRAY("xray", "Xray"),
+    MIHOMO("mihomo", "Mihomo"),
+    UNKNOWN("unknown", "Unknown");
+
+    companion object {
+        fun fromCliName(value: String): ProxyCore = entries.firstOrNull {
+            it.cliName.equals(value, ignoreCase = true)
+        } ?: UNKNOWN
+    }
+}
+
+data class CoreState(
+    val activeCore: ProxyCore = ProxyCore.UNKNOWN,
+    val xrayInstalled: Boolean = false,
+    val mihomoInstalled: Boolean = false,
+    val xrayRunning: Boolean = false,
+    val mihomoRunning: Boolean = false,
+    val xrayVersion: String = "",
+    val mihomoVersion: String = "",
+    val xrayPid: String = "",
+    val mihomoPid: String = "",
+    val xrayMem: String = "",
+    val mihomoMem: String = "",
+    val xrayConfigOk: Boolean? = null,
+    val mihomoConfigOk: Boolean? = null,
+    val xrayConfigDetail: String = "",
+    val mihomoConfigDetail: String = "",
+    val mihomoConfigPath: String = "",
+    val statusText: String = ""
+) {
+    val activeTitle: String get() = activeCore.title
+    val activeRunning: Boolean get() = when (activeCore) {
+        ProxyCore.XRAY -> xrayRunning
+        ProxyCore.MIHOMO -> mihomoRunning
+        ProxyCore.UNKNOWN -> xrayRunning || mihomoRunning
+    }
+}
+
+data class CoreSwitchResult(
+    val ok: Boolean,
+    val message: String,
+    val backupId: String = "",
+    val rolledBack: Boolean = false,
+    val detail: String = ""
 )
 
 data class ObservatoryState(
@@ -37,7 +88,8 @@ data class ProxyInfo(
     val sni: String = "",
     val failed: Boolean = false,
     val requests: Int = 0,
-    val selected: Boolean = false
+    val selected: Boolean = false,
+    val delayMs: Int = 0
 )
 
 sealed class RoutingMode {
