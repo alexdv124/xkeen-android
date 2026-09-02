@@ -137,7 +137,8 @@ data class RoutingConfig(
     val customRoutes: List<CustomRoute> = emptyList(),
     val quicBlocked: Boolean = true,
     val youtubeUnblock: Boolean = false,
-    val aqaraEnabled: Boolean = false
+    val aqaraEnabled: Boolean = false,
+    val zonaDirect: Boolean = false
 )
 
 data class SetupState(

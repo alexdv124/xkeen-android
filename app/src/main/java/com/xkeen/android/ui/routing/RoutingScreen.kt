@@ -50,7 +50,7 @@ fun RoutingScreen(sshClient: SshClient?) {
             try {
                 val config = XrayConfigRemote(sshClient)
                 val cmds = RouterCommands(sshClient)
-                val (ok, msg) = config.applyPreset(preset, routingConfig.customRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock, routingConfig.aqaraEnabled)
+                val (ok, msg) = config.applyPreset(preset, routingConfig.customRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock, routingConfig.aqaraEnabled, routingConfig.zonaDirect)
                 if (!ok) { message = msg; return@launch }
                 val test = cmds.testConfig()
                 if (!test.ok) {
@@ -144,7 +144,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                                 val (ok, msg) = cmds.applyQuicReject(checked)
                                 if (!ok) { message = msg; return@launch }
                                 // Rebuild routing to remove any legacy UDP 443 xray block rule
-                                config.applyPreset(routingConfig.preset, routingConfig.customRoutes, checked, routingConfig.youtubeUnblock, routingConfig.aqaraEnabled)
+                                config.applyPreset(routingConfig.preset, routingConfig.customRoutes, checked, routingConfig.youtubeUnblock, routingConfig.aqaraEnabled, routingConfig.zonaDirect)
                                 if (cmds.testConfig().ok) {
                                     cmds.restartXkeen()
                                     message = if (checked) "QUIC заблокирован (ICMP)" else "QUIC разблокирован"
@@ -182,7 +182,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                             try {
                                 val config = XrayConfigRemote(sshClient)
                                 val cmds = RouterCommands(sshClient)
-                                config.applyPreset(routingConfig.preset, routingConfig.customRoutes, routingConfig.quicBlocked, checked, routingConfig.aqaraEnabled)
+                                config.applyPreset(routingConfig.preset, routingConfig.customRoutes, routingConfig.quicBlocked, checked, routingConfig.aqaraEnabled, routingConfig.zonaDirect)
                                 if (cmds.testConfig().ok) {
                                     cmds.restartXkeen()
                                     message = if (checked) "YouTube через VPN" else "YouTube через geo-правила"
@@ -222,7 +222,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                                 val cmds = RouterCommands(sshClient)
                                 // Also strip any legacy Aqara custom routes so they don't duplicate the preset
                                 val cleaned = routingConfig.customRoutes.filterNot { it.comment.contains("Aqara") }
-                                config.applyPreset(routingConfig.preset, cleaned, routingConfig.quicBlocked, routingConfig.youtubeUnblock, checked)
+                                config.applyPreset(routingConfig.preset, cleaned, routingConfig.quicBlocked, routingConfig.youtubeUnblock, checked, routingConfig.zonaDirect)
                                 if (cmds.testConfig().ok) {
                                     cmds.restartXkeen()
                                     message = if (checked) "Aqara через VPN" else "Aqara через geo-правила"
@@ -233,6 +233,56 @@ fun RoutingScreen(sshClient: SshClient?) {
                         }
                     }
                 )
+            }
+        }
+
+        // === ZONA TOGGLE (torrent media app) ===
+        // Only meaningful when something is actually proxied — under ALL_DIRECT every
+        // destination already goes direct, so applyPreset skips the rule and the card hides.
+        if (routingConfig.preset != RoutingPreset.ALL_DIRECT) {
+            Card(Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                Row(
+                    Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.Movie, null, Modifier.size(20.dp))
+                    Spacer(Modifier.width(12.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text("Не проксировать Zona", fontWeight = FontWeight.Medium)
+                        Text("Домены zona.pub/upzona.net + CDN 5.35.170.0/24 напрямую. CDN числится в Нидерландах, geoip:ru его не ловит, и видео уходит в туннель",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Switch(
+                        enabled = !loading,
+                        checked = routingConfig.zonaDirect,
+                        onCheckedChange = { checked ->
+                            scope.launch {
+                                loading = true
+                                try {
+                                    val config = XrayConfigRemote(sshClient)
+                                    val cmds = RouterCommands(sshClient)
+                                    val (ok, msg) = config.applyPreset(
+                                        routingConfig.preset, routingConfig.customRoutes,
+                                        routingConfig.quicBlocked, routingConfig.youtubeUnblock,
+                                        routingConfig.aqaraEnabled, checked
+                                    )
+                                    if (!ok) { message = msg; return@launch }
+                                    val test = cmds.testConfig()
+                                    if (test.ok) {
+                                        cmds.restartXkeen()
+                                        message = if (checked) "Zona напрямую" else "Zona по geo-правилам"
+                                        refresh()
+                                    } else {
+                                        message = "Config test failed: ${test.output.takeLast(200)}"
+                                    }
+                                } catch (e: Exception) { message = e.message }
+                                finally { loading = false }
+                            }
+                        }
+                    )
+                }
             }
         }
 
@@ -440,7 +490,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                                         try {
                                             val config = XrayConfigRemote(sshClient)
                                             val cmds = RouterCommands(sshClient)
-                                            config.applyPreset(routingConfig.preset, newRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock, routingConfig.aqaraEnabled)
+                                            config.applyPreset(routingConfig.preset, newRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock, routingConfig.aqaraEnabled, routingConfig.zonaDirect)
                                             if (cmds.testConfig().ok) { cmds.restartXkeen(); refresh() }
                                             else { message = "Тест конфига провалился" }
                                         } catch (e: Exception) { message = e.message }
@@ -624,7 +674,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                     try {
                         val config = XrayConfigRemote(sshClient)
                         val cmds = RouterCommands(sshClient)
-                        config.applyPreset(routingConfig.preset, newRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock, routingConfig.aqaraEnabled)
+                        config.applyPreset(routingConfig.preset, newRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock, routingConfig.aqaraEnabled, routingConfig.zonaDirect)
                         if (cmds.testConfig().ok) {
                             cmds.restartXkeen()
                             message = "Маршрут добавлен: ${route.value}"
@@ -681,7 +731,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                         try {
                             val config = XrayConfigRemote(sshClient)
                             val cmds = RouterCommands(sshClient)
-                            config.applyPreset(routingConfig.preset, newRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock, routingConfig.aqaraEnabled)
+                            config.applyPreset(routingConfig.preset, newRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock, routingConfig.aqaraEnabled, routingConfig.zonaDirect)
                             if (cmds.testConfig().ok) {
                                 cmds.restartXkeen()
                                 message = "Маршрут добавлен: ${dev.ip} → ${if (selectedTarget == "proxy") "VPN" else "напрямую"}"

@@ -68,6 +68,15 @@ Tapping a device in the network list (ARP scan) opens a dialog to route all its 
 ### Aqara IoT workaround
 ТСПУ (Russian DPI) blocks direct traffic to Kingsoft Cloud (Aqara's backend). IPs `107.155.52.0/23` and `169.197.117.0/24` must be routed through proxy BEFORE the geoip:ru→direct rule (since these IPs are in Russia).
 
+### Zona "don't proxy" toggle
+Zona (zona.pub) is served from numbered mirrors — `az1/ag1/ay1/aw1/w1/g1/y1/ww1/wg1/wy1/wz1/android/adm.zona.pub`, all on `5.35.170.4` — with media coming from the same MEDIABRIDGE-NET range. That range is **registered in NL (AS58143)**, so `ext:geoip_v2fly.dat:ru` does not match it, and `zona.pub` is absent from geosite `category-ru`. Under the RU_DIRECT preset every Zona request therefore falls through to the catch-all and gets tunnelled.
+
+`RoutingConfig.zonaDirect` toggles two direct rules (`ZONA_IPS` = `5.35.170.0/24`, `ZONA_DOMAINS` = `zona.pub`, `upzona.net`, `zonastat.com`), emitted at step 5c in `applyPreset()` — alongside the other direct rules, after geoip/geosite and before the catch-all. Order is safe because the geo rules never match the NL range anyway, and it leaves custom **proxy** routes (steps 3/3b) winning, so a user can still override per IP or domain. The rule is skipped under ALL_DIRECT and the card is hidden there, since everything already goes direct.
+
+Both lists are needed: TLS SNI sniffing matches the mirrors by domain, while the `/24` catches media connections opened straight to the CDN address. The other Zona hosts already resolve into RU ranges covered by `geoip:ru` — `sync.zona.pub` → `80.77.168.41` (eServer, RU), `upzona.net` / `zonastat.com` → `185.22.234.0/23` (IHC, RU) — their domains are listed anyway so the toggle survives an address change. Torrent peer traffic is unaffected; the `bittorrent → direct` rule already handles it.
+
+Caveat: `5.35.170.0/24` is a shared CDN ("CDN video and music network"), so the IP half of the toggle also de-proxies anything else hosted there.
+
 ### Initial setup wizard (fresh xkeen install)
 `XrayConfigRemote.initialSetup()` generates configs from scratch:
 - `01_log.json` — enables logging (access + error, level warning). Default xkeen install has logging disabled, but the app needs logs for observatory and diagnostics.

@@ -353,6 +353,27 @@ class XrayConfigRemote(private val ssh: SshClient) {
             "domain:aqara.cn"
         )
 
+        // Zona (zona.pub) serves its site and API from numbered mirrors
+        // (az1/ag1/ay1/aw1/w1/g1/y1/ww1/wg1/wy1/wz1/android/adm) and streams media from
+        // MEDIABRIDGE-NET, AS58143 — registered in NL, so ext:geoip_v2fly.dat:ru does NOT
+        // match it and the domains are absent from geosite category-ru. Under RU_DIRECT
+        // that sends all Zona traffic through the VPN.
+        //
+        // Both lists are needed: TLS SNI sniffing catches the mirrors by domain, while the
+        // /24 catches media connections opened straight to the CDN address. The remaining
+        // Zona hosts (sync.zona.pub 80.77.168.41, upzona.net / zonastat.com 185.22.234.0/23)
+        // already resolve into RU ranges and are covered by geoip:ru — their domains are
+        // listed anyway so the toggle keeps working if those addresses move.
+        val ZONA_DOMAINS = listOf(
+            "domain:zona.pub",
+            "domain:upzona.net",
+            "domain:zonastat.com"
+        )
+
+        val ZONA_IPS = listOf(
+            "5.35.170.0/24"
+        )
+
         val YOUTUBE_DOMAINS = listOf(
             "domain:googlevideo.com",
             "domain:youtube.com",
@@ -412,7 +433,7 @@ class XrayConfigRemote(private val ssh: SshClient) {
                 customRoutes.add(CustomRoute(src, routeTarget, "Устройство", routeType = "source"))
             }
 
-            // Destination IP routes (not geoip, not standard private ranges, not Aqara preset)
+            // Destination IP routes (not geoip, not standard private ranges, not Aqara/Zona preset)
             val ips = obj["ip"]?.jsonArray
             ips?.forEach { ipEl ->
                 val ip = ipEl.jsonPrimitive.content
@@ -420,18 +441,18 @@ class XrayConfigRemote(private val ssh: SshClient) {
                     ip != "0.0.0.0/8" && !ip.startsWith("10.") && !ip.startsWith("127.") &&
                     !ip.startsWith("172.16.") && !ip.startsWith("192.168.") &&
                     !ip.startsWith("169.254.") && !ip.startsWith("224.") && ip != "255.255.255.255/32" &&
-                    ip !in AQARA_IPS) {
+                    ip !in AQARA_IPS && ip !in ZONA_IPS) {
                     customRoutes.add(CustomRoute(ip, routeTarget, ""))
                 }
             }
 
-            // Domain-based routes (not geosite presets, not standard TLDs, not YouTube/Aqara preset)
+            // Domain-based routes (not geosite presets, not standard TLDs, not YouTube/Aqara/Zona preset)
             val domains = obj["domain"]?.jsonArray
             domains?.forEach { domEl ->
                 val dom = domEl.jsonPrimitive.content
                 if (!dom.startsWith("ext:") && !dom.startsWith("geosite") &&
                     dom != "domain:ru" && dom != "domain:su" && dom != "domain:рф" &&
-                    dom !in YOUTUBE_DOMAINS && dom !in AQARA_DOMAINS) {
+                    dom !in YOUTUBE_DOMAINS && dom !in AQARA_DOMAINS && dom !in ZONA_DOMAINS) {
                     val cleanDomain = dom.removePrefix("domain:").removePrefix("full:")
                     customRoutes.add(CustomRoute(cleanDomain, routeTarget, "", routeType = "domain"))
                 }
@@ -471,6 +492,15 @@ class XrayConfigRemote(private val ssh: SshClient) {
             ips.any { it in AQARA_IPS } || domains.any { it in AQARA_DOMAINS }
         }
 
+        // Detect Zona preset: Zona CDN range or zona.pub domain forced to direct
+        val zonaDirect = rules.any { rule ->
+            val obj = rule.jsonObject
+            if (obj["outboundTag"]?.jsonPrimitive?.content != "direct") return@any false
+            val ips = obj["ip"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
+            val domains = obj["domain"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
+            ips.any { it in ZONA_IPS } || domains.any { it in ZONA_DOMAINS }
+        }
+
         val mode = getRoutingMode()
         val balancerTags = try { getBalancerTags() } catch (_: Exception) { emptyList() }
 
@@ -481,7 +511,8 @@ class XrayConfigRemote(private val ssh: SshClient) {
             customRoutes = customRoutes,
             quicBlocked = quicBlocked,
             youtubeUnblock = youtubeUnblock,
-            aqaraEnabled = aqaraEnabled
+            aqaraEnabled = aqaraEnabled,
+            zonaDirect = zonaDirect
         )
     }
 
@@ -740,7 +771,8 @@ class XrayConfigRemote(private val ssh: SshClient) {
         customRoutes: List<CustomRoute> = emptyList(),
         quicBlocked: Boolean = true,
         youtubeUnblock: Boolean = false,
-        aqaraEnabled: Boolean = false
+        aqaraEnabled: Boolean = false,
+        zonaDirect: Boolean = false
     ): Pair<Boolean, String> {
         val raw = ssh.readFile(Paths.ROUTING)
         val config = Json.parseToJsonElement(raw).jsonObject.toMutableMap()
@@ -952,6 +984,30 @@ class XrayConfigRemote(private val ssh: SshClient) {
                 put("outboundTag", "direct")
                 putJsonArray("domain") {
                     directCustomDomains.forEach { add(JsonPrimitive("domain:${it.value}")) }
+                }
+            })
+        }
+
+        // 5c. Zona preset: keep zona.pub and its media CDN off the tunnel.
+        // The CDN /24 is NL-registered, so the geoip:ru rule above never matches it and
+        // without this rule the catch-all would push Zona's video through the proxy.
+        // Placed with the other direct rules — an explicit custom proxy route (step 3/3b)
+        // still wins, so a user can override this per IP or domain.
+        if (zonaDirect && preset != RoutingPreset.ALL_DIRECT) {
+            rules.add(buildJsonObject {
+                put("type", "field")
+                put("inboundTag", inboundTags)
+                put("outboundTag", "direct")
+                putJsonArray("ip") {
+                    ZONA_IPS.forEach { add(JsonPrimitive(it)) }
+                }
+            })
+            rules.add(buildJsonObject {
+                put("type", "field")
+                put("inboundTag", inboundTags)
+                put("outboundTag", "direct")
+                putJsonArray("domain") {
+                    ZONA_DOMAINS.forEach { add(JsonPrimitive(it)) }
                 }
             })
         }
