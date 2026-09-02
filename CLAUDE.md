@@ -121,6 +121,36 @@ PID   USER     VSZ   STAT  COMMAND
 ```
 Indices: [0]=PID, [1]=user, [2]=memory(VSZ), [3]=state, [4+]=command. Memory is at index 2, NOT 3.
 
+## Release signing
+Every APK published before this was an **unminified debug build**, signed with whatever
+`~/.android/debug.keystore` the CI runner generated for that run — a different key each time.
+That made in-place updates impossible: users hit `INSTALL_FAILED_UPDATE_INCOMPATIBLE` on every
+release and had to uninstall, which wipes the Room profile database (`allowBackup="false"`,
+so there is nothing to restore from either).
+
+Releases now build `assembleRelease` against a fixed keystore. `app/build.gradle.kts` reads the
+signing material from env vars first (CI, decoded from GitHub Secrets) and falls back to
+`keystore.properties` at the repo root for local builds. Both that file and `*.jks` are
+gitignored. When neither source yields a usable keystore the release APK is left unsigned rather
+than failing the build, so a fresh clone still works with no secrets.
+
+Signing schemes are pinned explicitly instead of inheriting AGP defaults: v1 off (pointless at
+minSdk 26), v2 on, **v3 on** — v3 is what allows rotating the key later without forcing every
+user to reinstall again.
+
+Required GitHub Secrets: `KEYSTORE_BASE64` (base64 of the .jks), `KEYSTORE_PASSWORD`,
+`KEY_ALIAS`, `KEY_PASSWORD`. The workflow decodes the keystore into `RUNNER_TEMP`, builds,
+asserts the result is not debug-signed (a silent fallthrough would otherwise ship an
+unupdatable APK again), and deletes the decoded key with `if: always()`.
+
+**The keystore is irreplaceable.** Lose it and no future build can ever update an installed app
+— every user would have to uninstall and lose their router profiles.
+
+`isMinifyEnabled` is deliberately **false**. R8 has never run on this code, so enabling it in the
+same change as signing would ship two untested things at once. There are no `@Serializable`
+classes (all JSON goes through the dynamic `JsonObject` tree) and JSch already has keep rules,
+so turning it on later should be low-risk — but it needs a run on a real device first.
+
 ## Building
 ```bash
 bash setup-build.sh   # Downloads JDK 17 + Android SDK (~1.5 GB)

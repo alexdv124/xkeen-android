@@ -1,3 +1,6 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -6,6 +9,20 @@ plugins {
     id("com.google.dagger.hilt.android")
     id("com.google.devtools.ksp")
 }
+
+// Release signing material. CI exports these as env vars (decoded from GitHub Secrets);
+// locally they come from keystore.properties, which is gitignored next to the .jks itself.
+// When neither source has a usable keystore the release APK is simply left unsigned, so a
+// fresh clone still builds without any secrets.
+val keystoreProps = Properties().apply {
+    val f = rootProject.file("keystore.properties")
+    if (f.exists()) FileInputStream(f).use { load(it) }
+}
+val releaseStorePath: String? = System.getenv("KEYSTORE_FILE") ?: keystoreProps.getProperty("storeFile")
+val releaseStorePassword: String? = System.getenv("KEYSTORE_PASSWORD") ?: keystoreProps.getProperty("storePassword")
+val releaseKeyAlias: String? = System.getenv("KEY_ALIAS") ?: keystoreProps.getProperty("keyAlias")
+val releaseKeyPassword: String? = System.getenv("KEY_PASSWORD") ?: keystoreProps.getProperty("keyPassword")
+val releaseKeystore = releaseStorePath?.let { rootProject.file(it) }?.takeIf { it.exists() }
 
 android {
     namespace = "com.xkeen.android"
@@ -19,9 +36,33 @@ android {
         versionName = "1.4.0"
     }
 
+    signingConfigs {
+        if (releaseKeystore != null) {
+            create("release") {
+                storeFile = releaseKeystore
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+                // Set explicitly rather than relying on AGP defaults. v1 (JAR signing) is
+                // dead weight at minSdk 26 — v2 landed in Android 7.0. v3 is what makes key
+                // rotation possible later, so it is worth having from the very first release.
+                enableV1Signing = false
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = true
+            if (releaseKeystore != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+            // Deliberately off for the first signed release. Every APK shipped so far was
+            // an unminified debug build, so R8 has never actually run on this code; turning
+            // it on in the same change as signing would ship two untested things at once.
+            // Enable it separately, with a run on a real device to confirm nothing broke.
+            isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
