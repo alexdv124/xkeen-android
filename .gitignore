@@ -11,6 +11,8 @@
 *.aab
 *.jks
 *.keystore
+/keystore.properties
 /android-build/
 /build-tools/
 .claude/
+.DS_Store
