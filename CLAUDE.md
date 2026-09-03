@@ -69,13 +69,55 @@ Tapping a device in the network list (ARP scan) opens a dialog to route all its 
 ТСПУ (Russian DPI) blocks direct traffic to Kingsoft Cloud (Aqara's backend). IPs `107.155.52.0/23` and `169.197.117.0/24` must be routed through proxy BEFORE the geoip:ru→direct rule (since these IPs are in Russia).
 
 ### Zona "don't proxy" toggle
-Zona (zona.pub) is served from numbered mirrors — `az1/ag1/ay1/aw1/w1/g1/y1/ww1/wg1/wy1/wz1/android/adm.zona.pub`, all on `5.35.170.4` — with media coming from the same MEDIABRIDGE-NET range. That range is **registered in NL (AS58143)**, so `ext:geoip_v2fly.dat:ru` does not match it, and `zona.pub` is absent from geosite `category-ru`. Under the RU_DIRECT preset every Zona request therefore falls through to the catch-all and gets tunnelled.
+The reason Zona breaks under the tunnel is **not** bandwidth — it is that Russian services
+reject or degrade requests coming from foreign exit IPs. So `RoutingConfig.zonaDirect` covers
+exactly the RU-hosted half of Zona's infrastructure and deliberately leaves video alone.
 
-`RoutingConfig.zonaDirect` toggles two direct rules (`ZONA_IPS` = `5.35.170.0/24`, `ZONA_DOMAINS` = `zona.pub`, `upzona.net`, `zonastat.com`), emitted at step 5c in `applyPreset()` — alongside the other direct rules, after geoip/geosite and before the catch-all. Order is safe because the geo rules never match the NL range anyway, and it leaves custom **proxy** routes (steps 3/3b) winning, so a user can still override per IP or domain. The rule is skipped under ALL_DIRECT and the card is hidden there, since everything already goes direct.
+The first cut of this list was wrong because it was built by reading the website (CT logs plus
+the site's JS bundle). The apps use entirely different hosts. The current list came from
+capturing live connections off a real TV through Mihomo's `/connections` API:
 
-Both lists are needed: TLS SNI sniffing matches the mirrors by domain, while the `/24` catches media connections opened straight to the CDN address. The other Zona hosts already resolve into RU ranges covered by `geoip:ru` — `sync.zona.pub` → `80.77.168.41` (eServer, RU), `upzona.net` / `zonastat.com` → `185.22.234.0/23` (IHC, RU) — their domains are listed anyway so the toggle survives an address change. Torrent peer traffic is unaffected; the `bittorrent → direct` rule already handles it.
+| host | resolves to | |
+|---|---|---|
+| `mzona.net` (apirn1/apir0/syncr/evr) | 80.77.168.22 | eServer, RU — API |
+| `imgzona.video` (imgr1) | 37.143.13.84 | EuroByte, RU — posters |
+| `upzona.net`, `zonastat.com` | 185.22.234.0/23 | IHC, RU |
+| `zona.pub` and its mirrors | 5.35.170.4 | MEDIABRIDGE, **NL** — the website |
 
-Caveat: `5.35.170.0/24` is a shared CDN ("CDN video and music network"), so the IP half of the toggle also de-proxies anything else hosted there.
+Subdomains vary per function (`apir0`, `apirn1`, `syncr`, `evr`, `imgr1` all appeared within
+minutes), so everything is matched on the apex.
+
+**Video is intentionally excluded.** Zona is an aggregator and streams from whichever third
+party holds the release: one playback session produced `interkh.com` and `werkecdn.me`
+(FDCservers NL/DE), `stloadi.live` (AE), `vkvideo.cloud` and `obrut.show`. That set is
+unbounded and content-dependent, and being foreign it works through the tunnel anyway. A user
+who wants a particular host direct can add it via the existing custom domain routes.
+
+`ZONA_IPS` (`5.35.170.0/24`) is a backstop for connections opened straight to the website's CDN
+address with no SNI. Note it only functions under Xray — see the Mihomo caveat below.
+
+Rules are emitted at step 5c in `applyPreset()`, alongside the other direct rules, after
+geoip/geosite and before the catch-all. Ordering is safe because the geo rules never match
+these anyway, and it leaves custom **proxy** routes (steps 3/3b) winning so a user can still
+override. Skipped under ALL_DIRECT, where the card is hidden too.
+
+### Mihomo: geoip is effectively dead for sniffed connections
+`MihomoConfigRemote.ipRules()` appends `no-resolve` to every IP rule, including
+`GEOIP,RU,DIRECT`. With the sniffer on, a connection that yields a hostname carries **no**
+destination IP, and `no-resolve` forbids resolving one — so the rule cannot match. Measured on
+a live router: of 127 connections, `GeoIP` matched 8, every one of them a connection with a
+destination IP and no host; **zero** connections with a host ever matched any IP rule. 54 of
+the 67 that fell through to `MATCH,PROXY` had a hostname.
+
+The practical effect is that under Mihomo, "Russian traffic goes direct" rests entirely on the
+`geosite:category-ru` domain list. Any Russian service missing from that list gets tunnelled —
+and by the same logic that motivates the Zona toggle, those services will then reject the
+connection. Xray is unaffected: its `ip` field resolves and compares, which is the semantics
+`no-resolve` disables.
+
+The fix is to drop `no-resolve` from `GEOIP,<country>` and from user IP routes while keeping it
+on the private ranges (nothing resolves into 10/8 or 192.168/16). Not applied yet — it changes
+routing for all traffic in Mihomo mode and wants testing on a real router first.
 
 ### Initial setup wizard (fresh xkeen install)
 `XrayConfigRemote.initialSetup()` generates configs from scratch:

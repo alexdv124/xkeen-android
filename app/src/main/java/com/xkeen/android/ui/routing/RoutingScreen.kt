@@ -250,7 +250,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
                         Text("Не проксировать Zona", fontWeight = FontWeight.Medium)
-                        Text("Домены zona.pub/upzona.net + CDN 5.35.170.0/24 напрямую. CDN числится в Нидерландах, geoip:ru его не ловит, и видео уходит в туннель",
+                        Text("Сайт, API и постеры Зоны — напрямую. Они хостятся в России и с зарубежного IP отдают ошибки. Видео идёт через VPN как обычно",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }

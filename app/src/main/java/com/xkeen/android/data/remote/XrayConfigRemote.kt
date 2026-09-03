@@ -364,12 +364,34 @@ class XrayConfigRemote(private val ssh: SshClient) {
         // Zona hosts (sync.zona.pub 80.77.168.41, upzona.net / zonastat.com 185.22.234.0/23)
         // already resolve into RU ranges and are covered by geoip:ru — their domains are
         // listed anyway so the toggle keeps working if those addresses move.
+        // What actually breaks Zona under the tunnel is not bandwidth — it is that Russian
+        // services reject or degrade requests arriving from foreign exit IPs. So the list
+        // covers exactly the RU-hosted half of Zona's infrastructure, verified by capturing
+        // live connections from a real TV on the router:
+        //   mzona.net      API, apirn1/apir0/syncr/evr -> 80.77.168.22  (eServer, RU)
+        //   imgzona.video  posters, imgr1 -> 37.143.13.84               (EuroByte, RU)
+        //   upzona.net / zonastat.com -> 185.22.234.0/23                (IHC, RU)
+        // Subdomains vary per function, so these are matched on the apex, not per host.
+        //
+        // Video deliberately stays OUT. Zona is an aggregator: it streams from whichever
+        // third-party host holds the release — interkh.com and werkecdn.me (FDCservers
+        // NL/DE), stloadi.live (AE), vkvideo.cloud, obrut.show were all seen in a single
+        // playback session. That set is unbounded and content-dependent, and being foreign
+        // it works fine through the tunnel anyway. Users who still want a specific host
+        // direct can add it through the existing custom domain routes.
         val ZONA_DOMAINS = listOf(
             "domain:zona.pub",
             "domain:upzona.net",
-            "domain:zonastat.com"
+            "domain:zonastat.com",
+            "domain:mzona.net",
+            "domain:imgzona.video"
         )
 
+        // The website's own CDN (MEDIABRIDGE, NL). Kept as a backstop for connections opened
+        // straight to the address, where there is no SNI for the domain rules to match.
+        // Note this only bites under Xray: the Mihomo converter emits IP rules with
+        // `no-resolve`, and a sniffed connection carries no destination IP, so there the
+        // domain rules above are doing all the work.
         val ZONA_IPS = listOf(
             "5.35.170.0/24"
         )
