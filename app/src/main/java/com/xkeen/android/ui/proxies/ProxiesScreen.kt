@@ -1,6 +1,8 @@
 package com.xkeen.android.ui.proxies
 
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -12,9 +14,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.xkeen.android.data.remote.MihomoConfigRemote
 import com.xkeen.android.data.remote.MihomoApi
 import com.xkeen.android.data.remote.RouterCommands
 import com.xkeen.android.data.remote.VlessParser
+import com.xkeen.android.data.remote.XrayServerRemote
 import com.xkeen.android.data.remote.XrayConfigRemote
 import com.xkeen.android.data.ssh.SshClient
 import com.xkeen.android.domain.model.ConfigState
@@ -34,71 +38,118 @@ fun ProxiesScreen(sshClient: SshClient?) {
     var actionMessage by remember { mutableStateOf<String?>(null) }
     var configState by remember { mutableStateOf(ConfigState.Empty) }
     var showFailoverDialog by remember { mutableStateOf(false) }
-    var pendingNewTag by remember { mutableStateOf("") }
-    var activeCore by remember { mutableStateOf(ProxyCore.XRAY) }
+    var pendingNewTags by remember { mutableStateOf<List<String>>(emptyList()) }
+    var mihomoGroups by remember { mutableStateOf<List<String>>(emptyList()) }
+    var activeCore by remember { mutableStateOf(ProxyCore.UNKNOWN) }
     var mihomoSelectable by remember { mutableStateOf(false) }
+    var deletableNames by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var selectionMode by remember { mutableStateOf(false) }
+    var selectedNames by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var pendingDeletion by remember { mutableStateOf<Set<String>>(emptySet()) }
 
-    fun refresh() {
+    suspend fun refresh() {
         if (sshClient == null) return
         loading = true; error = null
-        scope.launch {
-            try {
-                val cmds = RouterCommands(sshClient)
-                val core = try { cmds.getCoreState().activeCore } catch (_: Exception) { ProxyCore.XRAY }
-                activeCore = core
-                if (core == ProxyCore.MIHOMO) {
-                    configState = ConfigState.Empty
-                    val api = MihomoApi(sshClient)
-                    if (!api.isAvailable()) {
-                        error = "На роутере нет curl — установите: opkg install curl"
-                        proxies = emptyList(); mihomoSelectable = false
-                    } else {
-                        val nodes = api.getProxies()
-                        val selector = nodes["PROXY"]?.takeIf { it.isGroup }
-                        val now = selector?.now ?: ""
-                        mihomoSelectable = selector != null
-                        val servers = nodes.values.filter {
-                            it.type.equals("Vless", true) || it.name.startsWith("proxy-")
-                        }
-                        proxies = buildList {
-                            if (selector != null && "AUTO" in selector.all) {
-                                add(ProxyInfo("AUTO", "авто по минимальной задержке", 0, "url-test",
-                                    selected = now == "AUTO"))
-                            }
-                            servers.forEach { n ->
-                                add(ProxyInfo(n.name, "", 0, n.type.lowercase(),
-                                    selected = n.name == now, delayMs = n.delayMs))
-                            }
-                        }
-                    }
+        activeCore = ProxyCore.UNKNOWN
+        deletableNames = emptySet()
+        try {
+            val cmds = RouterCommands(sshClient)
+            val core = cmds.getCoreState().activeCore
+            activeCore = core
+            if (core == ProxyCore.MIHOMO) {
+                configState = ConfigState.Empty
+                deletableNames = MihomoConfigRemote(sshClient).getProxyNames()
+                val api = MihomoApi(sshClient)
+                if (!api.isAvailable()) {
+                    error = "На роутере нет curl — установите: opkg install curl"
+                    proxies = emptyList(); mihomoSelectable = false
                 } else {
-                    val config = XrayConfigRemote(sshClient)
-                    configState = config.detectConfigState()
-                    val list = config.getProxyList()
-                    val obs = try { cmds.getObservatoryState() } catch (_: Exception) {
-                        com.xkeen.android.domain.model.ObservatoryState()
+                    val nodes = api.getProxies()
+                    val selector = nodes["PROXY"]?.takeIf { it.isGroup }
+                    val now = selector?.now ?: ""
+                    mihomoSelectable = selector != null
+                    val servers = nodes.values.filter {
+                        !it.isGroup && it.type.lowercase() !in setOf("direct", "reject", "rejectdrop", "compatible", "pass")
                     }
-                    proxies = list.map { p ->
-                        p.copy(
-                            failed = p.tag in obs.failedProxies,
-                            requests = obs.usage[p.tag] ?: 0,
-                            selected = p.tag == obs.selected
-                        )
+                    proxies = buildList {
+                        if (selector != null && "AUTO" in selector.all) {
+                            add(ProxyInfo("AUTO", "авто по минимальной задержке", 0, "url-test",
+                                selected = now == "AUTO"))
+                        }
+                        servers.forEach { n ->
+                            add(ProxyInfo(n.name, "", 0, n.type.lowercase(),
+                                selected = n.name == now, delayMs = n.delayMs))
+                        }
                     }
                 }
-            } catch (e: Exception) { error = e.message }
+            } else {
+                val config = XrayConfigRemote(sshClient)
+                configState = config.detectConfigState()
+                val list = config.getProxyList()
+                deletableNames = list.map { it.tag }.toSet()
+                val obs = try { cmds.getObservatoryState() } catch (_: Exception) {
+                    com.xkeen.android.domain.model.ObservatoryState()
+                }
+                proxies = list.map { p ->
+                    p.copy(
+                        failed = p.tag in obs.failedProxies,
+                        requests = obs.usage[p.tag] ?: 0,
+                        selected = p.tag == obs.selected
+                    )
+                }
+            }
+        } catch (e: Exception) { error = e.message }
+        finally { loading = false }
+    }
+
+    fun deleteServers(names: Set<String>) {
+        val client = sshClient ?: return
+        val core = activeCore
+        pendingDeletion = emptySet()
+        loading = true
+        scope.launch {
+            try {
+                val (ok, msg) = when (core) {
+                    ProxyCore.MIHOMO -> MihomoConfigRemote(client).removeProxies(names)
+                    ProxyCore.XRAY -> XrayServerRemote(client).removeProxies(names)
+                    ProxyCore.UNKNOWN -> false to "Активное ядро не определено"
+                }
+                actionMessage = msg
+                if (ok) {
+                    selectionMode = false
+                    selectedNames = emptySet()
+                    proxies = proxies.filterNot { it.tag in names }
+                    refresh()
+                }
+            } catch (e: Exception) { actionMessage = e.message }
             finally { loading = false }
         }
     }
 
-    LaunchedEffect(sshClient) { refresh() }
+    LaunchedEffect(sshClient) {
+        showAddSheet = false
+        showFailoverDialog = false
+        pendingDeletion = emptySet()
+        selectedNames = emptySet()
+        selectionMode = false
+        refresh()
+    }
+
+    val selectableNames = proxies.map { it.tag }.filter { it in deletableNames }.toSet()
 
     Scaffold(
         floatingActionButton = {
-            if (sshClient != null) {
+            if (sshClient != null && !loading && !selectionMode && activeCore != ProxyCore.UNKNOWN) {
                 FloatingActionButton(onClick = {
                     if (activeCore == ProxyCore.MIHOMO) {
-                        actionMessage = "Добавление серверов — в режиме Xray. Затем пересоберите конфиг Mihomo (Настройки → Ядро прокси)."
+                        loading = true
+                        scope.launch {
+                            try {
+                                mihomoGroups = MihomoConfigRemote(sshClient).getProxyGroups()
+                                showAddSheet = true
+                            } catch (e: Exception) { actionMessage = e.message }
+                            finally { loading = false }
+                        }
                     } else showAddSheet = true
                 }) {
                     Icon(Icons.Default.Add, "Добавить сервер")
@@ -171,7 +222,7 @@ fun ProxiesScreen(sshClient: SshClient?) {
                                             ) { Text("Обновить задержки") }
                                         } else {
                                             Text(
-                                                "Текущий конфиг без селектора — ручной выбор недоступен. Соберите конфиг заново: Настройки → Ядро прокси → «Собрать конфиг Mihomo».",
+                                                "Ручной выбор здесь доступен для группы PROXY. При добавлении серверов можно выбрать группы текущего конфига.",
                                                 style = MaterialTheme.typography.bodySmall
                                             )
                                         }
@@ -196,60 +247,89 @@ fun ProxiesScreen(sshClient: SshClient?) {
                                 }
                             }
                         }
-                        items(proxies) { proxy ->
+                        if (selectableNames.isNotEmpty()) {
+                            item {
+                                if (selectionMode) {
+                                    Column {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text("${selectedNames.size}", modifier = Modifier.weight(1f))
+                                            TextButton(onClick = {
+                                                selectedNames = if (selectedNames == selectableNames) emptySet() else selectableNames
+                                            }, enabled = !loading) {
+                                                Text(if (selectedNames == selectableNames) "Снять все" else "Выбрать все")
+                                            }
+                                            TextButton(onClick = { selectionMode = false; selectedNames = emptySet() }, enabled = !loading) {
+                                                Text("Отмена")
+                                            }
+                                        }
+                                        Button(
+                                            onClick = { pendingDeletion = selectedNames },
+                                            enabled = !loading && selectedNames.isNotEmpty(),
+                                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                                        ) { Text("Удалить выбранные (${selectedNames.size})") }
+                                    }
+                                } else {
+                                    OutlinedButton(onClick = { selectionMode = true; selectedNames = emptySet() }, enabled = !loading) {
+                                        Icon(Icons.Default.Checklist, null)
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Выбрать несколько")
+                                    }
+                                }
+                            }
+                        }
+                        items(proxies, key = { it.tag }) { proxy ->
+                            val canDelete = proxy.tag in deletableNames
+                            val toggleSelection: () -> Unit = {
+                                selectedNames = if (proxy.tag in selectedNames) selectedNames - proxy.tag else selectedNames + proxy.tag
+                            }
                             ProxyCard(
                                 proxy = proxy,
-                                showDelete = activeCore != ProxyCore.MIHOMO,
-                                onClick = if (activeCore == ProxyCore.MIHOMO && mihomoSelectable) {
+                                showDelete = canDelete && !loading && !selectionMode,
+                                checked = if (selectionMode && canDelete) proxy.tag in selectedNames else null,
+                                onCheckedChange = if (!loading) toggleSelection else null,
+                                fromSubscription = activeCore == ProxyCore.MIHOMO && !canDelete && proxy.tag != "AUTO",
+                                onClick = if (selectionMode) {
+                                    if (canDelete && !loading) toggleSelection else null
+                                } else if (activeCore == ProxyCore.MIHOMO && mihomoSelectable && !loading) {
                                     {
                                         scope.launch {
                                             loading = true
                                             try {
                                                 val ok = MihomoApi(sshClient).select("PROXY", proxy.tag)
-                                                actionMessage = if (ok) "Выбран: ${proxy.tag}"
-                                                    else "Не удалось выбрать ${proxy.tag}"
+                                                actionMessage = if (ok) "Выбран: ${proxy.tag}" else "Не удалось выбрать ${proxy.tag}"
                                                 refresh()
                                             } catch (e: Exception) { actionMessage = e.message }
                                             finally { loading = false }
                                         }
                                     }
                                 } else null,
-                                onDelete = {
-                                    scope.launch {
-                                        loading = true
-                                        try {
-                                            val config = XrayConfigRemote(sshClient)
-                                            val cmds = RouterCommands(sshClient)
-                                            val (ok, msg) = config.removeOutbound(proxy.tag)
-                                            if (!ok) { actionMessage = msg; return@launch }
-                                            // Also drop the tag from balancer selector so it doesn't
-                                            // linger as a ghost entry after the outbound is gone.
-                                            val balancerTags = try { config.getBalancerTags() } catch (_: Exception) { emptyList() }
-                                            if (proxy.tag in balancerTags) {
-                                                val remaining = balancerTags - proxy.tag
-                                                if (remaining.isNotEmpty()) {
-                                                    config.setBalancerTags(remaining)
-                                                }
-                                            }
-                                            val test = cmds.testConfig()
-                                            if (!test.ok) { actionMessage = "Config test failed"; return@launch }
-                                            cmds.restartXkeen()
-                                            actionMessage = "${proxy.tag} удалён"
-                                            // Remove from local list immediately, keep statuses for remaining
-                                            proxies = proxies.filter { it.tag != proxy.tag }
-                                            // Delayed refresh to let observatory collect data
-                                            kotlinx.coroutines.delay(3000)
-                                            refresh()
-                                        } catch (e: Exception) { actionMessage = e.message }
-                                        finally { loading = false }
-                                    }
-                                }
+                                onDelete = { pendingDeletion = setOf(proxy.tag) }
                             )
                         }
                     }
                 }
             }
         }
+    }
+
+    if (pendingDeletion.isNotEmpty()) {
+        val keepsServer = (deletableNames - pendingDeletion).isNotEmpty()
+        AlertDialog(
+            onDismissRequest = { pendingDeletion = emptySet() },
+            title = { Text(if (pendingDeletion.size == 1) "Удалить сервер?" else "Удалить ${pendingDeletion.size} серверов?") },
+            text = {
+                Column(Modifier.heightIn(max = 300.dp).verticalScroll(rememberScrollState())) {
+                    Text(pendingDeletion.joinToString("\n"))
+                    Spacer(Modifier.height(12.dp))
+                    Text(if (keepsServer) "Серверы будут удалены из ${activeCore.title}. Если активный сервер выбран для удаления, будет использован оставшийся."
+                        else "Нужно оставить хотя бы один сервер. Снимите выделение с сервера, который хотите сохранить.")
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { deleteServers(pendingDeletion) }, enabled = keepsServer && !loading) { Text("Удалить") }
+            },
+            dismissButton = { TextButton(onClick = { pendingDeletion = emptySet() }) { Text("Отмена") } }
+        )
     }
 
     // Failover setup dialog
@@ -259,7 +339,7 @@ fun ProxiesScreen(sshClient: SshClient?) {
             icon = { Icon(Icons.Default.SwapHoriz, null) },
             title = { Text("Включить автопереключение?") },
             text = {
-                Text("У вас теперь ${configState.proxyCount + 1} сервер(а). " +
+                Text("У вас теперь ${configState.proxyCount + pendingNewTags.size} сервер(а). " +
                     "Включить автоматическое переключение? Если текущий сервер упадёт, " +
                     "трафик автоматически пойдёт через другой. " +
                     "Будет использована стратегия leastping — выбирается сервер с минимальной задержкой.")
@@ -300,11 +380,11 @@ fun ProxiesScreen(sshClient: SshClient?) {
                             val test = cmds.testConfig()
                             if (!test.ok) {
                                 val config = XrayConfigRemote(sshClient)
-                                config.removeOutbound(pendingNewTag)
+                                pendingNewTags.forEach { config.removeOutbound(it) }
                                 actionMessage = "Config test failed"
                             } else {
                                 cmds.restartXkeen()
-                                actionMessage = "Добавлен $pendingNewTag (без failover)"
+                                actionMessage = "Добавлено серверов: ${pendingNewTags.size} (без failover)"
                             }
                             refresh()
                         } catch (e: Exception) { actionMessage = e.message }
@@ -318,57 +398,56 @@ fun ProxiesScreen(sshClient: SshClient?) {
     if (showAddSheet && sshClient != null) {
         AddProxySheet(
             onDismiss = { showAddSheet = false },
-            onDeploy = { vlessLink, customTag ->
+            mihomoGroups = if (activeCore == ProxyCore.MIHOMO) mihomoGroups else null,
+            onDeploy = { vlessLinks, customTag, groups ->
                 showAddSheet = false
+                loading = true
                 scope.launch {
-                    loading = true
                     try {
-                        val parser = VlessParser()
-                        val parsed = parser.parse(vlessLink)
-                        val outbound = mapToJsonObject(parsed.outbound).let { obj ->
-                            if (customTag.isNotEmpty()) {
-                                val mutable = obj.toMutableMap()
-                                mutable["tag"] = JsonPrimitive(customTag)
-                                JsonObject(mutable)
-                            } else obj
+                        if (activeCore == ProxyCore.MIHOMO) {
+                            actionMessage = "Проверяю и применяю конфиг Mihomo..."
+                            val (ok, msg) = MihomoConfigRemote(sshClient).addVless(vlessLinks, customTag, groups)
+                            actionMessage = msg
+                            if (ok) refresh()
+                            return@launch
                         }
                         val config = XrayConfigRemote(sshClient)
                         val cmds = RouterCommands(sshClient)
-                        val newTag = outbound["tag"]?.jsonPrimitive?.content ?: run {
-                            actionMessage = "No tag in outbound"; return@launch
+                        val parser = VlessParser()
+                        // Parse the whole batch before writing, then write sequentially.
+                        val parsedLinks = vlessLinks.map { parser.parse(it) }
+                        val newTags = mutableListOf<String>()
+                        for (parsed in parsedLinks) {
+                            val outbound = mapToJsonObject(parsed.outbound).let { obj ->
+                                if (customTag.isNotBlank() && parsedLinks.size == 1) {
+                                    JsonObject(obj.toMutableMap().apply { put("tag", JsonPrimitive(customTag.trim())) })
+                                } else obj
+                            }
+                            val newTag = outbound["tag"]?.jsonPrimitive?.content
+                                ?: error("No tag in outbound")
+                            actionMessage = "Добавляю $newTag..."
+                            val (ok, msg) = config.addOutbound(outbound, parsed.fragmentSettings?.let { mapToJsonObject(it) })
+                            if (!ok) { actionMessage = msg; return@launch }
+                            newTags += newTag
                         }
-
-                        actionMessage = "Добавляю $newTag..."
-                        val fragmentSettings = parsed.fragmentSettings?.let { mapToJsonObject(it) }
-                        val (ok, msg) = config.addOutbound(outbound, fragmentSettings)
-                        if (!ok) { actionMessage = msg; return@launch }
-
-                        // Detect if we just went from 1 to 2+ proxies without balancer
                         val state = config.detectConfigState()
                         if (state.proxyCount >= 2 && !state.hasBalancer) {
-                            // Need to enable failover
-                            pendingNewTag = newTag
-                            loading = false
+                            pendingNewTags = newTags
                             showFailoverDialog = true
                             return@launch
                         }
-
-                        // If balancer exists, add new proxy to it
                         if (state.hasBalancer) {
-                            config.addToBalancer(newTag)
+                            newTags.forEach { config.addToBalancer(it) }
                         }
-
                         actionMessage = "Тестирую конфиг..."
                         val test = cmds.testConfig()
                         if (!test.ok) {
-                            config.removeOutbound(newTag)
+                            newTags.forEach { config.removeOutbound(it) }
                             actionMessage = "Config test failed: ${test.output.takeLast(200)}"
                             return@launch
                         }
-                        actionMessage = "Перезапускаю xray..."
-                        cmds.restartXkeen()
-                        actionMessage = "Добавлен $newTag"
-                        // Delayed refresh to let observatory collect data
+                        val (ok, msg) = cmds.restartXkeen()
+                        actionMessage = if (ok) "Добавлено серверов: ${newTags.size}" else msg
                         kotlinx.coroutines.delay(3000)
                         refresh()
                     } catch (e: Exception) { actionMessage = e.message }
@@ -383,11 +462,12 @@ fun ProxiesScreen(sshClient: SshClient?) {
 fun ProxyCard(
     proxy: ProxyInfo,
     showDelete: Boolean = true,
+    checked: Boolean? = null,
+    onCheckedChange: (() -> Unit)? = null,
+    fromSubscription: Boolean = false,
     onClick: (() -> Unit)? = null,
     onDelete: () -> Unit
 ) {
-    var showDeleteConfirm by remember { mutableStateOf(false) }
-
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -402,14 +482,16 @@ fun ProxyCard(
     ) {
         Column(Modifier.padding(16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
+                if (checked != null) {
+                    Checkbox(checked = checked, onCheckedChange = { onCheckedChange?.invoke() }, enabled = onCheckedChange != null)
+                }
                 Icon(
                     if (proxy.failed) Icons.Default.ErrorOutline else Icons.Default.CheckCircleOutline,
                     null, Modifier.size(20.dp),
                     tint = if (proxy.failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
                 )
                 Spacer(Modifier.width(8.dp))
-                Text(proxy.tag, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.weight(1f))
+                Text(proxy.tag, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                 if (proxy.delayMs > 0) {
                     Text("${proxy.delayMs} ms", style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -423,10 +505,13 @@ fun ProxyCard(
                     }
                 }
                 if (showDelete) {
-                    IconButton(onClick = { showDeleteConfirm = true }, Modifier.size(32.dp)) {
+                    IconButton(onClick = onDelete, Modifier.size(32.dp)) {
                         Icon(Icons.Default.DeleteOutline, "Удалить", Modifier.size(18.dp))
                     }
                 }
+            }
+            if (fromSubscription) {
+                Text("Из подписки — удаление в источнике подписки", style = MaterialTheme.typography.bodySmall)
             }
             if (proxy.address.isNotBlank()) {
                 Spacer(Modifier.height(4.dp))
@@ -445,34 +530,29 @@ fun ProxyCard(
             }
         }
     }
-
-    if (showDeleteConfirm) {
-        AlertDialog(
-            onDismissRequest = { showDeleteConfirm = false },
-            title = { Text("Удалить ${proxy.tag}?") },
-            text = { Text("Сервер будет удалён из конфигурации и xray перезапущен") },
-            confirmButton = {
-                TextButton(onClick = { showDeleteConfirm = false; onDelete() }) { Text("Удалить") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDeleteConfirm = false }) { Text("Отмена") }
-            }
-        )
-    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AddProxySheet(onDismiss: () -> Unit, onDeploy: (String, String) -> Unit) {
+fun AddProxySheet(
+    onDismiss: () -> Unit,
+    mihomoGroups: List<String>? = null,
+    onDeploy: (List<String>, String, List<String>) -> Unit
+) {
     var vlessLinks by remember { mutableStateOf("") }
     var customTag by remember { mutableStateOf("") }
 
-    val links = vlessLinks.lines().filter { it.trim().startsWith("vless://") }
+    var selectedGroups by remember(mihomoGroups) {
+        mutableStateOf(mihomoGroups.orEmpty().filter { it == "PROXY" || it == "AUTO" }
+            .ifEmpty { mihomoGroups.orEmpty().take(1) })
+    }
+    val links = vlessLinks.lines().map { it.trim() }.filter { it.isNotEmpty() }
+    val validLinks = links.isNotEmpty() && links.all { it.startsWith("vless://") }
     val isBulk = links.size > 1
 
     ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(Modifier.padding(24.dp)) {
-            Text("Добавить сервер", style = MaterialTheme.typography.titleLarge)
+        Column(Modifier.verticalScroll(rememberScrollState()).padding(24.dp)) {
+            Text(if (mihomoGroups != null) "Добавить в Mihomo" else "Добавить сервер", style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(16.dp))
             OutlinedTextField(
                 value = vlessLinks,
@@ -480,29 +560,48 @@ fun AddProxySheet(onDismiss: () -> Unit, onDeploy: (String, String) -> Unit) {
                 label = { Text(if (isBulk) "VLESS-ссылки (${links.size} шт.)" else "VLESS-ссылка") },
                 modifier = Modifier.fillMaxWidth(),
                 minLines = 3, maxLines = 8,
-                supportingText = { Text("Можно вставить несколько ссылок — по одной на строку") }
+                isError = links.isNotEmpty() && !validLinks,
+                supportingText = {
+                    Text(if (links.isNotEmpty() && !validLinks) "Каждая строка должна начинаться с vless://"
+                        else "Можно вставить несколько ссылок — по одной на строку")
+                }
             )
             if (!isBulk) {
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = customTag,
                     onValueChange = { customTag = it },
-                    label = { Text("Тег (опционально)") },
+                    label = { Text(if (mihomoGroups != null) "Имя (опционально)" else "Тег (опционально)") },
                     modifier = Modifier.fillMaxWidth(),
                     placeholder = { Text("proxy-xx1") },
                     singleLine = true
                 )
             }
+            if (mihomoGroups != null) {
+                Spacer(Modifier.height(16.dp))
+                Text("Добавить в группы", style = MaterialTheme.typography.titleSmall)
+                if (mihomoGroups.isEmpty()) {
+                    Text("В конфиге нет групп для добавления серверов (select, url-test, fallback или load-balance).",
+                        color = MaterialTheme.colorScheme.error)
+                }
+                mihomoGroups.forEach { group ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = group in selectedGroups,
+                            onCheckedChange = { checked ->
+                                selectedGroups = if (checked) selectedGroups + group else selectedGroups - group
+                            }
+                        )
+                        Text(group)
+                    }
+                }
+                Text("Конфиг будет проверен и применён автоматически.", style = MaterialTheme.typography.bodySmall)
+            }
             Spacer(Modifier.height(16.dp))
             Button(
-                onClick = {
-                    // Deploy links sequentially (first triggers failover dialog if needed)
-                    links.forEachIndexed { i, link ->
-                        onDeploy(link.trim(), if (!isBulk) customTag else "")
-                    }
-                },
+                onClick = { onDeploy(links, if (!isBulk) customTag else "", selectedGroups) },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = links.isNotEmpty()
+                enabled = validLinks && (mihomoGroups == null || selectedGroups.isNotEmpty())
             ) {
                 Icon(Icons.Default.CloudUpload, null)
                 Spacer(Modifier.width(8.dp))

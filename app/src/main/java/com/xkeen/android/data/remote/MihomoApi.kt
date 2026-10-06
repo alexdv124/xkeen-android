@@ -1,6 +1,8 @@
 package com.xkeen.android.data.remote
 
-import com.xkeen.android.data.ssh.SshClient
+import com.xkeen.android.data.ssh.SshConnection
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
@@ -29,7 +31,7 @@ data class MihomoNode(
  * whatever xkeen set up, falling back to the `127.0.0.1:9090` / no-secret default that the
  * app's own generated config uses.
  */
-class MihomoApi(private val ssh: SshClient) {
+class MihomoApi(private val ssh: SshConnection) {
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -106,7 +108,7 @@ class MihomoApi(private val ssh: SshClient) {
 
     /** Selects [member] inside the [group] selector (PUT /proxies/{group}). */
     suspend fun select(group: String, member: String): Boolean {
-        val resp = curl("PUT", "/proxies/${enc(group)}", body = """{"name":"$member"}""")
+        val resp = curl("PUT", "/proxies/${enc(group)}", body = buildJsonObject { put("name", member) }.toString())
         return resp.httpCode.startsWith("2")
     }
 
@@ -132,7 +134,7 @@ class MihomoApi(private val ssh: SshClient) {
 
     /** Hot-reloads the config file in place (PUT /configs?force=true). */
     suspend fun reloadConfig(path: String): Boolean {
-        val resp = curl("PUT", "/configs?force=true", body = """{"path":"$path"}""")
+        val resp = curl("PUT", "/configs?force=true", body = buildJsonObject { put("path", path) }.toString())
         return resp.httpCode.startsWith("2")
     }
 
@@ -176,12 +178,7 @@ class MihomoApi(private val ssh: SshClient) {
     private fun shellEscape(value: String): String = value.replace("'", "'\\''")
 
     /** Minimal percent-encoding for a path segment (our names are ASCII, but be safe). */
-    private fun enc(name: String): String = name
-        .replace("%", "%25")
-        .replace(" ", "%20")
-        .replace("/", "%2F")
-        .replace("#", "%23")
-        .replace("?", "%3F")
+    private fun enc(name: String): String = java.net.URLEncoder.encode(name, "UTF-8").replace("+", "%20")
 
     private companion object {
         val GROUP_TYPES = setOf("Selector", "URLTest", "Fallback", "LoadBalance", "Relay")

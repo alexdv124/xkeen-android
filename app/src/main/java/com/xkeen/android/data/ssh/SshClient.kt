@@ -12,7 +12,7 @@ import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.util.Base64
 
-class SshClient(private val profile: RouterProfile) {
+class SshClient(private val profile: RouterProfile) : SshConnection {
     private var session: Session? = null
     private val mutex = Mutex()
     private val writeMutex = Mutex()
@@ -39,7 +39,7 @@ class SshClient(private val profile: RouterProfile) {
         session = newSession
     }
 
-    suspend fun exec(cmd: String, timeout: Int = 15000): SshResult = mutex.withLock {
+    override suspend fun exec(cmd: String, timeout: Int): SshResult = mutex.withLock {
         withContext(Dispatchers.IO) {
             connect()
             val currentSession = session ?: throw IllegalStateException("SSH not connected")
@@ -71,11 +71,11 @@ class SshClient(private val profile: RouterProfile) {
         }
     }
 
-    suspend fun readFile(path: String): String {
-        return exec("cat $path").stdout
+    override suspend fun readFile(path: String): String {
+        return exec("cat ${shellQuote(path)}").stdout
     }
 
-    suspend fun writeFileB64(path: String, content: String) = writeMutex.withLock {
+    override suspend fun writeFileB64(path: String, content: String): Unit = writeMutex.withLock {
         val b64 = Base64.getEncoder().encodeToString(content.toByteArray(Charsets.UTF_8))
         val chunkSize = 4000
         val chunks = b64.chunked(chunkSize)
@@ -88,9 +88,9 @@ class SshClient(private val profile: RouterProfile) {
                 exec("printf '%s' '$chunk' >> $tmpB64")
             }
             // Atomic write: decode to .tmp, only mv on success
-            val result = exec("base64 -d $tmpB64 > $tmpOut && mv $tmpOut $path && echo OK")
+            val result = exec("base64 -d $tmpB64 > ${shellQuote(tmpOut)} && mv ${shellQuote(tmpOut)} ${shellQuote(path)} && echo OK")
             if (!result.stdout.contains("OK")) {
-                exec("rm -f $tmpOut")
+                exec("rm -f ${shellQuote(tmpOut)}")
                 throw IllegalStateException("writeFileB64 failed: ${result.stderr.take(200)}")
             }
         } finally {
@@ -102,6 +102,8 @@ class SshClient(private val profile: RouterProfile) {
         session?.disconnect()
         session = null
     }
+
+    private fun shellQuote(value: String): String = "'" + value.replace("'", "'\\''") + "'"
 }
 
 data class SshResult(

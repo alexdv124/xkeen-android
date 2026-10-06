@@ -57,7 +57,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                     message = "Config test failed: ${test.output.takeLast(200)}"
                     return@launch
                 }
-                cmds.restartXkeen()
+                cmds.restartXkeen().also { (ok, detail) -> check(ok) { detail } }
                 message = "Применён: ${preset.title}"
                 refresh()
             } catch (e: Exception) { message = e.message }
@@ -146,7 +146,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                                 // Rebuild routing to remove any legacy UDP 443 xray block rule
                                 config.applyPreset(routingConfig.preset, routingConfig.customRoutes, checked, routingConfig.youtubeUnblock, routingConfig.aqaraEnabled, routingConfig.zonaDirect)
                                 if (cmds.testConfig().ok) {
-                                    cmds.restartXkeen()
+                                    cmds.restartXkeen().also { (ok, detail) -> check(ok) { detail } }
                                     message = if (checked) "QUIC заблокирован (ICMP)" else "QUIC разблокирован"
                                     refresh()
                                 } else { message = "Config test failed" }
@@ -184,7 +184,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                                 val cmds = RouterCommands(sshClient)
                                 config.applyPreset(routingConfig.preset, routingConfig.customRoutes, routingConfig.quicBlocked, checked, routingConfig.aqaraEnabled, routingConfig.zonaDirect)
                                 if (cmds.testConfig().ok) {
-                                    cmds.restartXkeen()
+                                    cmds.restartXkeen().also { (ok, detail) -> check(ok) { detail } }
                                     message = if (checked) "YouTube через VPN" else "YouTube через geo-правила"
                                     refresh()
                                 } else { message = "Config test failed" }
@@ -224,7 +224,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                                 val cleaned = routingConfig.customRoutes.filterNot { it.comment.contains("Aqara") }
                                 config.applyPreset(routingConfig.preset, cleaned, routingConfig.quicBlocked, routingConfig.youtubeUnblock, checked, routingConfig.zonaDirect)
                                 if (cmds.testConfig().ok) {
-                                    cmds.restartXkeen()
+                                    cmds.restartXkeen().also { (ok, detail) -> check(ok) { detail } }
                                     message = if (checked) "Aqara через VPN" else "Aqara через geo-правила"
                                     refresh()
                                 } else { message = "Config test failed" }
@@ -271,7 +271,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                                     if (!ok) { message = msg; return@launch }
                                     val test = cmds.testConfig()
                                     if (test.ok) {
-                                        cmds.restartXkeen()
+                                        cmds.restartXkeen().also { (ok, detail) -> check(ok) { detail } }
                                         message = if (checked) "Zona напрямую" else "Zona по geo-правилам"
                                         refresh()
                                     } else {
@@ -318,7 +318,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                                         val cmds = RouterCommands(sshClient)
                                         config.setRoutingMode(RoutingMode.Auto)
                                         val test = cmds.testConfig()
-                                        if (test.ok) { cmds.restartXkeen(); message = "Авто-режим"; refresh() }
+                                        if (test.ok) { cmds.restartXkeen().also { (ok, detail) -> check(ok) { detail } }; message = "Авто-режим"; refresh() }
                                         else { message = "Test failed" }
                                     } catch (e: Exception) { message = e.message }
                                     finally { loading = false }
@@ -339,7 +339,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                                         val cmds = RouterCommands(sshClient)
                                         config.setRoutingMode(RoutingMode.Manual(firstProxy.tag))
                                         val test = cmds.testConfig()
-                                        if (test.ok) { cmds.restartXkeen(); message = "Ручной режим: ${firstProxy.tag}"; refresh() }
+                                        if (test.ok) { cmds.restartXkeen().also { (ok, detail) -> check(ok) { detail } }; message = "Ручной режим: ${firstProxy.tag}"; refresh() }
                                         else { config.setRoutingMode(RoutingMode.Auto); message = "Test failed" }
                                     } catch (e: Exception) { message = e.message }
                                     finally { loading = false }
@@ -375,7 +375,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                                                 val config = XrayConfigRemote(sshClient)
                                                 val cmds = RouterCommands(sshClient)
                                                 config.setBalancerTags(newTags)
-                                                if (cmds.testConfig().ok) { cmds.restartXkeen(); refresh() }
+                                                if (cmds.testConfig().ok) { cmds.restartXkeen().also { (ok, detail) -> check(ok) { detail } }; refresh() }
                                             } catch (e: Exception) { message = e.message }
                                             finally { loading = false }
                                         }
@@ -391,7 +391,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                                                 val config = XrayConfigRemote(sshClient)
                                                 val cmds = RouterCommands(sshClient)
                                                 config.setRoutingMode(RoutingMode.Manual(proxy.tag))
-                                                if (cmds.testConfig().ok) { cmds.restartXkeen(); message = "Выбран: ${proxy.tag}"; refresh() }
+                                                if (cmds.testConfig().ok) { cmds.restartXkeen().also { (ok, detail) -> check(ok) { detail } }; message = "Выбран: ${proxy.tag}"; refresh() }
                                                 else { config.setRoutingMode(RoutingMode.Auto); message = "Test failed" }
                                             } catch (e: Exception) { message = e.message }
                                             finally { loading = false }
@@ -491,7 +491,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                                             val config = XrayConfigRemote(sshClient)
                                             val cmds = RouterCommands(sshClient)
                                             config.applyPreset(routingConfig.preset, newRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock, routingConfig.aqaraEnabled, routingConfig.zonaDirect)
-                                            if (cmds.testConfig().ok) { cmds.restartXkeen(); refresh() }
+                                            if (cmds.testConfig().ok) { cmds.restartXkeen().also { (ok, detail) -> check(ok) { detail } }; refresh() }
                                             else { message = "Тест конфига провалился" }
                                         } catch (e: Exception) { message = e.message }
                                         finally { loading = false }
@@ -676,7 +676,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                         val cmds = RouterCommands(sshClient)
                         config.applyPreset(routingConfig.preset, newRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock, routingConfig.aqaraEnabled, routingConfig.zonaDirect)
                         if (cmds.testConfig().ok) {
-                            cmds.restartXkeen()
+                            cmds.restartXkeen().also { (ok, detail) -> check(ok) { detail } }
                             message = "Маршрут добавлен: ${route.value}"
                             refresh()
                         } else { message = "Config test failed" }
@@ -733,7 +733,7 @@ fun RoutingScreen(sshClient: SshClient?) {
                             val cmds = RouterCommands(sshClient)
                             config.applyPreset(routingConfig.preset, newRoutes, routingConfig.quicBlocked, routingConfig.youtubeUnblock, routingConfig.aqaraEnabled, routingConfig.zonaDirect)
                             if (cmds.testConfig().ok) {
-                                cmds.restartXkeen()
+                                cmds.restartXkeen().also { (ok, detail) -> check(ok) { detail } }
                                 message = "Маршрут добавлен: ${dev.ip} → ${if (selectedTarget == "proxy") "VPN" else "напрямую"}"
                                 refresh()
                             } else { message = "Config test failed" }

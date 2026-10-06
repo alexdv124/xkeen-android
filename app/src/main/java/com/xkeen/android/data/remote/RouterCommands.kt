@@ -1,6 +1,6 @@
 package com.xkeen.android.data.remote
 
-import com.xkeen.android.data.ssh.SshClient
+import com.xkeen.android.data.ssh.SshConnection
 import com.xkeen.android.domain.model.ConfigTestResult
 import com.xkeen.android.domain.model.CoreState
 import com.xkeen.android.domain.model.CoreSwitchResult
@@ -25,7 +25,7 @@ object Paths {
     const val OBSERVATORY = "$CONFIGS_DIR/07_observatory.json"
 }
 
-class RouterCommands(private val ssh: SshClient) {
+class RouterCommands(private val ssh: SshConnection) {
 
     private data class ProcessInfo(
         val running: Boolean = false,
@@ -489,13 +489,11 @@ class RouterCommands(private val ssh: SshClient) {
     }
 
     suspend fun restartXkeen(): Pair<Boolean, String> {
-        // In Mihomo mode the UI has just edited the Xray JSON; rebuild the Mihomo config
-        // from it and hot-reload instead of a full core restart. The manual server choice
-        // survives the rebuild because the config keeps `store-selected: true` (cache.db).
+        // Routing UI edits Xray rules. Update only Mihomo rules so independently added
+        // servers, groups, DNS and controller settings survive subsequent routing changes.
         val core = try { getCoreState().activeCore } catch (_: Exception) { ProxyCore.UNKNOWN }
         if (core == ProxyCore.MIHOMO) {
-            val gen = generateMihomoConfigFromXray()
-            return Pair(gen.ok, gen.message)
+            return MihomoConfigRemote(ssh).applyRoutingFromXray()
         }
 
         try {

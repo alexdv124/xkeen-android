@@ -35,6 +35,45 @@ MVVM + Clean Architecture. Kotlin, Jetpack Compose, Material Design 3.
 
 ## Critical implementation details
 
+### Direct Mihomo server import
+`ProxiesScreen` accepts one or several VLESS links while Mihomo is active. The user selects
+target groups (PROXY/AUTO by default). `MihomoConfigBuilder` shares the existing TCP/XHTTP
+converter with Xray-to-Mihomo generation; `MihomoConfigEditor` uses SnakeYAML's SafeConstructor
+to add proxies and group members while retaining the rest of the current YAML. Automatically
+generated names get numeric suffixes on collision; explicit duplicate names are rejected.
+Unsupported transports and Xray `fm` fragmentation are rejected before any writes.
+
+`MihomoConfigRemote.addVless` imports the entire batch in one serialized transaction: stage
+beside the discovered config, run `mihomo -t`, save a unique `.bak`, atomically install and
+reload through the existing controller API, restore selector choices. A failed or uncertain
+install/reload restores the original file and reloads it. The transaction completes or rolls
+back even if the screen is closed after installation starts. It never reads or writes Xray
+config files. `SshConnection` permits deployment failure tests without a router.
+
+In Mihomo mode `RouterCommands.restartXkeen` now updates **only rules** from the routing UI,
+preserving native Mihomo proxies/groups/settings. Explicit generation from Xray remains a
+full replacement. Unit tests cover batch import, preservation, collisions, converter options,
+preflight failures, failed validation, uncertain writes, reload rollback and concurrent edits.
+
+### Single and batch server deletion
+`ProxiesScreen` has a shared selection mode and one confirmation for a complete batch, plus
+single-server delete buttons, in both cores. AUTO and provider-owned Mihomo nodes are excluded
+from deletion. Both editors require at least one local proxy to remain and reject deletion of
+a node still used as a dialer by a surviving node.
+
+`MihomoConfigEditor.removeProxies` cleans group membership, direct rule targets (including
+sub-rules) and provider download proxy references. Empty static groups get a surviving server.
+The existing staged validation/reload transaction applies the entire batch once, choosing a
+surviving selector member when the previous member was deleted; rollback restores the old
+selection as well as the file.
+
+`XrayServerEditor` repairs routing rules, balancer selectors/fallbacks and observatory selectors
+using Xray's prefix matching semantics. `XrayServerRemote` stages a copy of all JSON configs,
+edits 04/05/07, tests the staged directory with the asset environment, backs up the original
+configs and restarts once after installing the batch. Partial writes and failed restarts
+restore every affected file and restart the original configuration. Backups remain under
+`configs/backups/delete-<uuid>/`. Unit tests cover both editors and transaction failure paths.
+
 ### Config test must include env vars
 ```
 XRAY_LOCATION_ASSET=/opt/etc/xray/dat XRAY_LOCATION_CONFDIR=/opt/etc/xray/configs xray run -test -confdir /opt/etc/xray/configs/
