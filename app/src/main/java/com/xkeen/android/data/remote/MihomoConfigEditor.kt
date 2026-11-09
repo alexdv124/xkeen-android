@@ -151,6 +151,23 @@ internal class MihomoConfigEditor {
         return yaml.dump(config)
     }
 
+    /**
+     * Re-adds the app-managed subscription (URL and the benchmark's SUB-BEST filter) from [oldRaw]
+     * to a freshly generated [newRaw]. Without this, "Собрать конфиг Mihomo" silently dropped it.
+     */
+    fun carrySubscription(oldRaw: String, newRaw: String): String {
+        val old = runCatching { document(oldRaw) }.getOrNull() ?: return newRaw
+        val url = runCatching { subscriptionUrl(oldRaw) }.getOrNull() ?: return newRaw
+        val filter = maps(old["proxy-groups"]).firstOrNull { name(it) == SubscriptionNames.BEST }?.get("filter") as? String
+        val withSub = document(enableSubscription(newRaw, url))
+        if (!filter.isNullOrBlank()) {
+            withSub["proxy-groups"] = maps(withSub["proxy-groups"]).map { group ->
+                if (name(group) == SubscriptionNames.BEST) group.toMutableMap().apply { put("filter", filter) } else group
+            }
+        }
+        return yaml.dump(withSub)
+    }
+
     private fun isManagedGroup(group: Map<String, Any?>): Boolean =
         (group["use"] as? List<*>)?.contains(SubscriptionNames.PROVIDER) == true
 

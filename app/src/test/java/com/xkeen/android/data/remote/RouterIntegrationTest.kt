@@ -65,6 +65,18 @@ class RouterIntegrationTest {
                     assertTrue(msg, ok)
                     assertFalse(sub.status().enabled)
                 }
+                "zona-on" -> {
+                    // Same as the routing screen's "Не проксировать Zona" switch.
+                    val config = XrayConfigRemote(ssh)
+                    val rc = config.getRoutingConfig()
+                    println("BEFORE: preset=${rc.preset} zona=${rc.zonaDirect} youtube=${rc.youtubeUnblock} aqara=${rc.aqaraEnabled}")
+                    val (ok, msg) = config.applyPreset(rc.preset, rc.customRoutes, rc.quicBlocked, rc.youtubeUnblock, rc.aqaraEnabled, true)
+                    assertTrue(msg, ok)
+                    val cmds = RouterCommands(ssh)
+                    assertTrue(cmds.testConfig().ok)
+                    println("APPLY: ${cmds.restartXkeen()}")
+                    println("AFTER: zona=${config.getRoutingConfig().zonaDirect}")
+                }
                 "core" -> println("CORE: ${RouterCommands(ssh).getCoreState(withConfigTests = true)}")
                 "diag" -> RouterCommands(ssh).runDiagnostics().checks.forEach { println("DIAG: $it") }
                 "backup" -> {

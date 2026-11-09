@@ -109,6 +109,19 @@ class SubscriptionEditorTest {
         assertEquals(listOf(SubscriptionNames.BEST, SubscriptionNames.ALL), groups.first { it["name"] == "PROXY" }["proxies"])
     }
 
+    @Test fun `regenerating the config keeps the subscription and its benchmark filter`() {
+        val withSub = editor.enableSubscription(MIHOMO_CONFIG, SUB_URL)
+            .replace("name: SUB-BEST", "name: SUB-BEST\n  filter: ^(?:a|b)$")
+        val regenerated = MIHOMO_CONFIG.replace("proxy-old", "proxy-fresh")
+        val carried = parseYaml(editor.carrySubscription(withSub, regenerated))
+        assertEquals(SUB_URL, editor.subscriptionUrl(editor.carrySubscription(withSub, regenerated)))
+        val groups = entries(carried, "proxy-groups").associateBy { it["name"] }
+        assertEquals("^(?:a|b)$", groups.getValue(SubscriptionNames.BEST)["filter"])
+        assertEquals(listOf(SubscriptionNames.BEST, SubscriptionNames.ALL, "AUTO", "proxy-fresh"), groups.getValue("PROXY")["proxies"])
+        // No subscription before: the generated config is returned untouched.
+        assertSame(regenerated, editor.carrySubscription(MIHOMO_CONFIG, regenerated))
+    }
+
     @Test fun `subscription urls are validated`() {
         assertTrue(isValidSubscriptionUrl(SUB_URL))
         assertTrue(isValidSubscriptionUrl("http://1.2.3.4:8080/sub"))

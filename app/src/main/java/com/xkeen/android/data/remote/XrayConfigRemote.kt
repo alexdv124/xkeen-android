@@ -1,6 +1,6 @@
 package com.xkeen.android.data.remote
 
-import com.xkeen.android.data.ssh.SshClient
+import com.xkeen.android.data.ssh.SshConnection
 import com.xkeen.android.domain.model.ConfigState
 import com.xkeen.android.domain.model.CustomRoute
 import com.xkeen.android.domain.model.ProxyInfo
@@ -10,7 +10,7 @@ import com.xkeen.android.domain.model.RoutingPreset
 import com.xkeen.android.domain.model.SetupState
 import kotlinx.serialization.json.*
 
-class XrayConfigRemote(private val ssh: SshClient) {
+class XrayConfigRemote(private val ssh: SshConnection) {
 
     private val json = Json { ignoreUnknownKeys = true; prettyPrint = true }
 
@@ -392,6 +392,12 @@ class XrayConfigRemote(private val ssh: SshClient) {
         // Note this only bites under Xray: the Mihomo converter emits IP rules with
         // `no-resolve`, and a sniffed connection carries no destination IP, so there the
         // domain rules above are doing all the work.
+        /** Private ranges that presets (or older app versions) wrote literally. */
+        val STANDARD_PRIVATE_RANGES = setOf(
+            "0.0.0.0/8", "10.0.0.0/8", "127.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+            "169.254.0.0/16", "224.0.0.0/4", "255.255.255.255/32", "fc00::/7", "fe80::/10", "::1/128"
+        )
+
         val ZONA_IPS = listOf(
             "5.35.170.0/24"
         )
@@ -459,11 +465,11 @@ class XrayConfigRemote(private val ssh: SshClient) {
             val ips = obj["ip"]?.jsonArray
             ips?.forEach { ipEl ->
                 val ip = ipEl.jsonPrimitive.content
+                // Only the exact standard ranges are preset-owned. A user route such as a VPN
+                // subnet (10.8.0.0/24) or a LAN segment used to be filtered out here by prefix and
+                // silently disappeared on the next routing change.
                 if (!ip.startsWith("ext:") && !ip.startsWith("geoip") &&
-                    ip != "0.0.0.0/8" && !ip.startsWith("10.") && !ip.startsWith("127.") &&
-                    !ip.startsWith("172.16.") && !ip.startsWith("192.168.") &&
-                    !ip.startsWith("169.254.") && !ip.startsWith("224.") && ip != "255.255.255.255/32" &&
-                    ip !in AQARA_IPS && ip !in ZONA_IPS) {
+                    ip !in STANDARD_PRIVATE_RANGES && ip !in AQARA_IPS && ip !in ZONA_IPS) {
                     customRoutes.add(CustomRoute(ip, routeTarget, ""))
                 }
             }
@@ -494,21 +500,23 @@ class XrayConfigRemote(private val ssh: SshClient) {
         } catch (_: Exception) { false }
         val quicBlocked = quicXrayBlocked || quicIptablesBlocked
 
+        // A preset rule goes "through VPN" when it targets the balancer or any outbound other
+        // than direct/block (servers are not guaranteed to be tagged proxy-*).
+        fun JsonObject.targetsProxy(): Boolean = containsKey("balancerTag") ||
+            this["outboundTag"]?.jsonPrimitive?.content?.let { it != "direct" && it != "block" } == true
+
         // Detect YouTube preset: rule with googlevideo.com going through balancer/proxy
         val youtubeUnblock = rules.any { rule ->
             val obj = rule.jsonObject
             val domains = obj["domain"]?.jsonArray
-            val hasProxyTarget = obj.containsKey("balancerTag") ||
-                obj["outboundTag"]?.jsonPrimitive?.content?.startsWith("proxy-") == true
+            val hasProxyTarget = obj.targetsProxy()
             hasProxyTarget && domains?.any { it.jsonPrimitive.content == "domain:googlevideo.com" } == true
         }
 
         // Detect Aqara preset: either Aqara IPs or aqara.com domain routed to proxy
         val aqaraEnabled = rules.any { rule ->
             val obj = rule.jsonObject
-            val hasProxyTarget = obj.containsKey("balancerTag") ||
-                obj["outboundTag"]?.jsonPrimitive?.content?.startsWith("proxy-") == true
-            if (!hasProxyTarget) return@any false
+            if (!obj.targetsProxy()) return@any false
             val ips = obj["ip"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
             val domains = obj["domain"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
             ips.any { it in AQARA_IPS } || domains.any { it in AQARA_DOMAINS }
@@ -806,6 +814,13 @@ class XrayConfigRemote(private val ssh: SshClient) {
             add(JsonPrimitive("tproxy"))
         }
 
+        // A server picked manually lives only in the old catch-all rule; keep it, otherwise any
+        // toggle (YouTube, QUIC, Zona, a custom route) silently switched routing back to Auto.
+        val proxyTags = getProxyList().map { it.tag }
+        val manualTag = (routing["rules"] as? JsonArray)?.lastOrNull()?.let { it as? JsonObject }
+            ?.get("outboundTag")?.jsonPrimitive?.contentOrNull
+            ?.takeIf { it.startsWith("proxy-") && it in proxyTags }
+
         val rules = mutableListOf<JsonObject>()
 
         // 1. Block NetBIOS/SMB broadcast on UDP. QUIC (UDP 443) is handled
@@ -986,7 +1001,9 @@ class XrayConfigRemote(private val ssh: SshClient) {
 
         // 5. Custom destination routes that go DIRECT
         val directCustomIps = customRoutes.filter { it.routeType == "ip" && it.target == "direct" }
-        if (directCustomIps.isNotEmpty() && preset != RoutingPreset.ALL_DIRECT) {
+        // Kept under ALL_DIRECT as well (a no-op there): routes are stored only in these rules,
+        // so dropping them lost the user's direct routes after "Всё напрямую" → another preset.
+        if (directCustomIps.isNotEmpty()) {
             rules.add(buildJsonObject {
                 put("type", "field")
                 put("inboundTag", inboundTags)
@@ -999,7 +1016,7 @@ class XrayConfigRemote(private val ssh: SshClient) {
 
         // 5b. Custom domain routes that go DIRECT
         val directCustomDomains = customRoutes.filter { it.routeType == "domain" && it.target == "direct" }
-        if (directCustomDomains.isNotEmpty() && preset != RoutingPreset.ALL_DIRECT) {
+        if (directCustomDomains.isNotEmpty()) {
             rules.add(buildJsonObject {
                 put("type", "field")
                 put("inboundTag", inboundTags)
@@ -1015,7 +1032,9 @@ class XrayConfigRemote(private val ssh: SshClient) {
         // without this rule the catch-all would push Zona's video through the proxy.
         // Placed with the other direct rules — an explicit custom proxy route (step 3/3b)
         // still wins, so a user can override this per IP or domain.
-        if (zonaDirect && preset != RoutingPreset.ALL_DIRECT) {
+        // Emitted under ALL_DIRECT too: there it changes nothing, but the toggle is stored only
+        // in these rules, and dropping them made "Всё напрямую" → "Стандартный" lose Zona.
+        if (zonaDirect) {
             rules.add(buildJsonObject {
                 put("type", "field")
                 put("inboundTag", inboundTags)
@@ -1047,7 +1066,7 @@ class XrayConfigRemote(private val ssh: SshClient) {
                 val hasBalancer = routing["balancers"]?.jsonArray?.any {
                     it.jsonObject["tag"]?.jsonPrimitive?.content == "proxy-balancer"
                 } ?: false
-                if (hasBalancer) {
+                if (hasBalancer && manualTag == null) {
                     buildJsonObject {
                         put("type", "field")
                         put("inboundTag", inboundTags)
@@ -1055,9 +1074,8 @@ class XrayConfigRemote(private val ssh: SshClient) {
                         put("balancerTag", "proxy-balancer")
                     }
                 } else {
-                    // Single server — use first proxy tag
-                    val proxies = getProxyList()
-                    val firstProxy = proxies.firstOrNull()?.tag ?: "direct"
+                    // Manually chosen server, or the single server
+                    val firstProxy = manualTag ?: proxyTags.firstOrNull() ?: "direct"
                     buildJsonObject {
                         put("type", "field")
                         put("inboundTag", inboundTags)

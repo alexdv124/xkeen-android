@@ -289,6 +289,7 @@ refresh_provider() {
 }
 
 cmd_daily() {
+    has_provider || { log "subscription is not in the Mihomo config, skipping"; exit 0; }
     lock
     mihomo_up || die "mihomo is not running"
     refresh_provider
@@ -296,8 +297,12 @@ cmd_daily() {
     bench
 }
 
+has_provider() { yq -e ".[\"proxy-providers\"][\"$PROVIDER\"]" "$CFG" >/dev/null 2>&1; }
+
 cmd_check() {
     [ -f "$CONF" ] || exit 0
+    # Config replaced without the subscription (e.g. a restored backup): nothing to maintain.
+    has_provider || exit 0
     mihomo_up || exit 0
     lock
     reason=""

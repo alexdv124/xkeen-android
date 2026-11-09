@@ -87,6 +87,14 @@ so the lock shows "running" at once and the script accepts a lock holding its ow
 xkeen's own variable file (jsDelivr fallback), then runs `xkeen -uk auto` / `xkeen -um auto` with stdin from /dev/null,
 after `backupCoreConfigs()`, and restarts the proxy if it ended up stopped. Requires xkeen with `get_auto_arg` (2.x).
 
+### Routing toggles are stored only in the rules (v1.7.1)
+`getRoutingConfig()` reconstructs every toggle (YouTube, Aqara, Zona, custom routes, manual server) from
+05_routing.json, and every UI change re-applies `applyPreset()` with what was read back. Anything a preset
+does not write is therefore lost on the next change. So: Zona and direct custom routes are written under
+ALL_DIRECT too (no-ops there); only the exact `STANDARD_PRIVATE_RANGES` are treated as preset-owned when
+reading IP routes; a manually chosen `proxy-*` catch-all is kept by `applyPreset()`; any outbound other than
+direct/block counts as a proxy target. `RoutingPresetTest` round-trips all of this through ALL_DIRECT.
+
 ### Single and batch server deletion
 `ProxiesScreen` has a shared selection mode and one confirmation for a complete batch, plus
 single-server delete buttons, in both cores. AUTO and provider-owned Mihomo nodes are excluded

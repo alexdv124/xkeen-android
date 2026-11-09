@@ -509,7 +509,10 @@ fun ProxiesScreen(sshClient: SshClient?) {
                         for (parsed in parsedLinks) {
                             val outbound = mapToJsonObject(parsed.outbound).let { obj ->
                                 if (customTag.isNotBlank() && parsedLinks.size == 1) {
-                                    JsonObject(obj.toMutableMap().apply { put("tag", JsonPrimitive(customTag.trim())) })
+                                    // Servers are recognised by the proxy- prefix everywhere (lists,
+                                    // balancer, routing presets, Mihomo conversion).
+                                    val tag = customTag.trim().let { if (it.startsWith("proxy-")) it else "proxy-$it" }
+                                    JsonObject(obj.toMutableMap().apply { put("tag", JsonPrimitive(tag)) })
                                 } else obj
                             }
                             val newTag = outbound["tag"]?.jsonPrimitive?.content

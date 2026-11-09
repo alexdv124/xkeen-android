@@ -11,10 +11,14 @@ import java.util.UUID
 
 class MihomoConfigRemote(private val ssh: SshConnection) {
     suspend fun writeFromXrayConfig(): Pair<Boolean, String> {
-        val raw = MihomoConfigBuilder().fromXray(ssh.readFile(Paths.OUTBOUNDS), ssh.readFile(Paths.ROUTING))
+        val generated = MihomoConfigBuilder().fromXray(ssh.readFile(Paths.OUTBOUNDS), ssh.readFile(Paths.ROUTING))
+        val existing = RouterCommands(ssh).findMihomoConfigPath().takeIf { it.isNotBlank() }
+            ?.let { runCatching { ssh.readFile(it) }.getOrNull() }.orEmpty()
+        val raw = if (existing.isNotBlank()) MihomoConfigEditor().carrySubscription(existing, generated) else generated
         ssh.exec("mkdir -p ${Paths.MIHOMO_DIR} /opt/var/log/mihomo")
         ssh.writeFileB64(Paths.MIHOMO_CONFIG, raw)
-        return true to "Конфиг Mihomo создан: ${Paths.MIHOMO_CONFIG}"
+        val kept = if (raw !== generated) " Подписка сохранена." else ""
+        return true to "Конфиг Mihomo создан: ${Paths.MIHOMO_CONFIG}.$kept"
     }
 
     suspend fun getProxyGroups(): List<String> = withContext(Dispatchers.IO) {
