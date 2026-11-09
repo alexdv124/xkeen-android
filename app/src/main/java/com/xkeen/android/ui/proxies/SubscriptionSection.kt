@@ -14,6 +14,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.xkeen.android.data.remote.SubscriptionNames
 import com.xkeen.android.data.remote.SubscriptionSettings
 import com.xkeen.android.data.remote.SubscriptionStatus
 import com.xkeen.android.data.remote.isValidSubscriptionUrl
@@ -29,6 +30,7 @@ fun SubscriptionCard(
     onSettings: () -> Unit,
     onRefresh: () -> Unit,
     onRebench: () -> Unit,
+    onGeo: () -> Unit,
     onDisable: () -> Unit
 ) {
     Card(
@@ -111,6 +113,31 @@ fun SubscriptionCard(
                     } else if (!status.running) {
                         Text("Замер ещё не выполнялся: пока используются все серверы подписки.",
                             style = MaterialTheme.typography.bodySmall)
+                    }
+                    HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                    val services = SubscriptionNames.GEO_SERVICES.joinToString(", ")
+                    if (!status.geoGroup) {
+                        Text(
+                            "Обход геоблока для $services ещё не включён. Откройте «Настройки» и нажмите «Сохранить».",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    } else {
+                        Text("$services — только через серверы, которые они пускают:",
+                            style = MaterialTheme.typography.labelLarge)
+                        val ok = status.geoOk
+                        Text(
+                            when {
+                                ok.isNotEmpty() -> ok.joinToString(", ") { it.name }
+                                status.geoServers.isNotEmpty() -> "Ни один проверенный сервер не прошёл проверку, используются прежние"
+                                else -> "Проверка ещё не выполнялась"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (ok.isEmpty() && status.geoServers.isNotEmpty()) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        TextButton(onClick = onGeo, enabled = !busy && !status.running,
+                            contentPadding = PaddingValues(0.dp)) { Text("Проверить заново") }
                     }
                     Spacer(Modifier.height(4.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

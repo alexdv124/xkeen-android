@@ -44,6 +44,8 @@ data class BenchServer(
     val chosen: Boolean
 )
 
+data class GeoServer(val name: String, val ok: Boolean, val reason: String = "")
+
 data class SubscriptionStatus(
     val enabled: Boolean = false,
     val url: String = "",
@@ -55,9 +57,13 @@ data class SubscriptionStatus(
     val lastBench: Long = 0,
     val lastError: String = "",
     val log: String = "",
-    val servers: List<BenchServer> = emptyList()
+    val servers: List<BenchServer> = emptyList(),
+    /** False for configs made by 1.7.x: SUB-GEO appears after re-saving the settings. */
+    val geoGroup: Boolean = false,
+    val geoServers: List<GeoServer> = emptyList()
 ) {
     val chosen: List<BenchServer> get() = servers.filter { it.chosen }
+    val geoOk: List<GeoServer> get() = geoServers.filter { it.ok }
 }
 
 /**
@@ -74,7 +80,11 @@ class SubscriptionRemote(private val ssh: SshConnection) {
     }
 
     suspend fun status(): SubscriptionStatus = withContext(Dispatchers.IO) {
-        val url = MihomoConfigRemote(ssh).subscriptionUrl().orEmpty()
+        val path = RouterCommands(ssh).findMihomoConfigPath()
+        val raw = if (path.isBlank()) "" else ssh.readFile(path)
+        val editor = MihomoConfigEditor()
+        val url = runCatching { editor.subscriptionUrl(raw) }.getOrNull().orEmpty()
+        val geoGroup = runCatching { editor.hasGroup(raw, SubscriptionNames.GEO) }.getOrDefault(false)
         val out = ssh.exec(
             "S=${SubscriptionNames.SCRIPT}; " +
                 "[ -x \"\$S\" ] && echo SCRIPT=1; " +
@@ -99,7 +109,8 @@ class SubscriptionRemote(private val ssh: SshConnection) {
             url = url,
             settings = settings,
             scriptInstalled = "SCRIPT=1" in head,
-            cronInstalled = "CRON=1" in head
+            cronInstalled = "CRON=1" in head,
+            geoGroup = geoGroup
         )
         parseStatusJson(body, base)
     }
@@ -119,7 +130,16 @@ class SubscriptionRemote(private val ssh: SshConnection) {
                 chosen = o["chosen"]?.jsonPrimitive?.booleanOrNull ?: false
             )
         }.orEmpty().sortedWith(compareByDescending<BenchServer> { it.chosen }.thenByDescending { it.downMbit + 2 * it.upMbit })
+        val geo = obj["geo"]?.let { runCatching { it.jsonObject["servers"]?.jsonArray }.getOrNull() }?.mapNotNull { el ->
+            val o = el as? JsonObject ?: return@mapNotNull null
+            GeoServer(
+                name = o["name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null,
+                ok = o["ok"]?.jsonPrimitive?.booleanOrNull ?: false,
+                reason = o["reason"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            )
+        }.orEmpty()
         return base.copy(
+            geoServers = geo,
             running = obj["running"]?.jsonPrimitive?.booleanOrNull ?: false,
             lastUpdate = s("last_update").toLongOrNull() ?: 0,
             lastBench = s("last_bench").toLongOrNull() ?: result?.get("ts")?.jsonPrimitive?.longOrNull ?: 0,
@@ -152,14 +172,28 @@ class SubscriptionRemote(private val ssh: SshConnection) {
         }
     }
 
-    /** Changes the schedule/top-N without touching the Mihomo config. */
+    /**
+     * Changes the schedule/top-N. A config made by an older app version is upgraded in place
+     * (re-applying the subscription is idempotent and keeps the benchmark filters).
+     */
     suspend fun updateSettings(settings: SubscriptionSettings): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         try {
             val path = RouterCommands(ssh).findMihomoConfigPath()
             require(path.isNotBlank()) { "Конфиг Mihomo не найден" }
             installScript(path, settings)
             installCron(settings)
-            true to "Настройки сохранены. Обновление каждый день в ${settings.dailyTime}, серверов: ${settings.topN}"
+            val raw = ssh.readFile(path)
+            val editor = MihomoConfigEditor()
+            val url = editor.subscriptionUrl(raw)
+            var extra = ""
+            if (url != null && !editor.hasGroup(raw, SubscriptionNames.GEO)) {
+                val (ok, msg) = MihomoConfigRemote(ssh).enableSubscription(url)
+                if (!ok) return@withContext false to msg
+                extra = if (startInBackground("geo", delaySeconds = 2))
+                    " Включён обход геоблока для ${SubscriptionNames.GEO_SERVICES.joinToString()}: роутер подбирает для них серверы."
+                else ""
+            }
+            true to "Настройки сохранены. Обновление каждый день в ${settings.dailyTime}, серверов: ${settings.topN}.$extra"
         } catch (e: Exception) {
             false to (e.message ?: "Не удалось сохранить настройки")
         }
@@ -174,6 +208,9 @@ class SubscriptionRemote(private val ssh: SshConnection) {
 
     /** Refresh the subscription and pick the best servers again (same as the daily job). */
     suspend fun refreshNow(): Pair<Boolean, String> = start("daily", "Обновляю подписку и замеряю скорость серверов…")
+
+    /** Re-check which servers geo-blocking services accept (no speed test). */
+    suspend fun recheckGeo(): Pair<Boolean, String> = start("geo", "Проверяю, какие серверы пускают ElevenLabs, ChatGPT и Claude…")
 
     /** Re-measure without downloading the subscription again. */
     suspend fun rebenchNow(): Pair<Boolean, String> = start("bench", "Замеряю скорость серверов…")

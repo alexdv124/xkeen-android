@@ -82,6 +82,18 @@ Router quirks this relies on / works around: BusyBox `sort -t<TAB> -kN -n` mis-o
 Entware jq has no regex (`test()` unavailable — use grep); the app starts runs as `(sleep; exec script) & echo $! > lock/pid`
 so the lock shows "running" at once and the script accepts a lock holding its own PID.
 
+### Geo-blocked services (v1.8.0)
+`SUB-GEO` (url-test over the provider, `filter` written by `xk-sub.sh geo`) carries
+`SubscriptionNames.GEO_DOMAINS` (ElevenLabs, OpenAI/ChatGPT, Anthropic/Claude) via
+`DOMAIN-SUFFIX,…,SUB-GEO` rules placed right after the bench rule. `isManagedRule()` covers both, and
+`replaceRules`/`disableSubscription`/`carrySubscription` treat them as one block. The script checks servers through
+the bench listener without following redirects: elevenlabs.io must answer 200 (blocked exits 302 to
+geo-restriction.elevenlabs.io), api.openai.com and api.anthropic.com must answer 401 (blocked: 403). Mihomo's own
+health check cannot do this — it counts blocked exits as healthy. Candidates: last bench ranking first, then alive
+servers by delay, deduplicated by server:port, up to GEO_N=5 passing. Runs after every bench, from `check` when
+SUB-GEO has no alive member or was never checked, and via `xk-sub.sh geo`. Configs from 1.7.x get SUB-GEO when the
+subscription settings are saved (`updateSettings` re-applies `enableSubscription`).
+
 ### XKeen / Mihomo updates (v1.7.0)
 `UpdatesRemote` reads installed versions (xkeen variable file, `mihomo -v`) and the latest release from the API URLs in
 xkeen's own variable file (jsDelivr fallback), then runs `xkeen -uk auto` / `xkeen -um auto` with stdin from /dev/null,

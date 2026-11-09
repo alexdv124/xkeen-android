@@ -89,6 +89,7 @@ fun ProxiesScreen(sshClient: SshClient?) {
                         val description = when {
                             n.name == SubscriptionNames.BEST -> "лучшие из подписки · сейчас: ${n.now}"
                             n.name == SubscriptionNames.ALL -> "вся подписка, авто · сейчас: ${n.now}"
+                            n.name == SubscriptionNames.GEO -> "для сервисов с геоблоком · сейчас: ${n.now}"
                             n.name == "AUTO" && n.isGroup -> "авто · сейчас: ${n.now}"
                             n.isGroup -> "группа · сейчас: ${n.now}"
                             else -> ""
@@ -243,6 +244,7 @@ fun ProxiesScreen(sshClient: SshClient?) {
                                     onSettings = { showSubDialog = true },
                                     onRefresh = { subscriptionAction { it.refreshNow() } },
                                     onRebench = { subscriptionAction { it.rebenchNow() } },
+                                    onGeo = { subscriptionAction { it.recheckGeo() } },
                                     onDisable = { confirmSubDisable = true }
                                 )
                             }

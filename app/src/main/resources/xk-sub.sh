@@ -5,6 +5,7 @@
 #   xk-sub.sh daily   refresh the subscription now and pick the best servers again
 #   xk-sub.sh check   cheap health check (cron, every 30 min): re-pick only when needed
 #   xk-sub.sh bench   pick the best servers now
+#   xk-sub.sh geo     re-check which servers geo-blocking services (ElevenLabs, OpenAI, Anthropic) accept
 #   xk-sub.sh status  print a JSON summary for the app
 #
 # Mihomo downloads and parses the subscription itself (proxy-provider "xk-sub").
@@ -22,6 +23,8 @@ LOCK="/tmp/xk-sub.lock"
 PROVIDER="xk-sub"
 BEST_GROUP="SUB-BEST"
 BENCH_GROUP="SUB-BENCH"
+GEO_GROUP="SUB-GEO"
+GEO_RESULT="$XK_DIR/geo.json"
 
 # Defaults, overridden by subscription.conf (written by the app).
 TOP_N=10
@@ -36,6 +39,14 @@ UP_KB=8192
 UP_TIME=10
 MIN_DOWN_MBIT=5
 REBENCH_DAYS=7
+# Geo-blocking services: servers in SUB-GEO must pass every check below ("URL|accepted codes").
+# Redirects are not followed: ElevenLabs answers 302 -> geo-restriction.elevenlabs.io when it
+# blocks an exit, the OpenAI/Anthropic APIs answer 403 instead of 401.
+GEO_N=5
+GEO_MAX_TESTS=30
+GEO_CHECKS="https://elevenlabs.io/|200
+https://api.openai.com/v1/models|401
+https://api.anthropic.com/v1/models|401"
 MIHOMO_CONFIG=""
 
 [ -f "$CONF" ] && . "$CONF"
@@ -155,17 +166,31 @@ server_map() {
 
 regex_escape() { printf '%s' "$1" | sed 's/[][\\.^$*+?(){}|\/]/\\&/g'; }
 
-set_filter() { # new filter regex ("" = all servers)
-    want="$1"
-    cur="$(yq -r "(.[\"proxy-groups\"][] | select(.name == \"$BEST_GROUP\")).filter // \"\"" "$CFG" 2>/dev/null)"
+names_filter() { # newline-separated names on stdin -> ^(?:a|b)$
+    f="$(while IFS= read -r n; do [ -n "$n" ] && { regex_escape "$n"; printf '\n'; }; done \
+        | awk 'NF { s = s (s == "" ? "" : "|") $0 } END { print s }')"
+    [ -n "$f" ] && printf '^(?:%s)$' "$f"
+}
+
+has_group() { yq -e "(.[\"proxy-groups\"][] | select(.name == \"$1\"))" "$CFG" >/dev/null 2>&1; }
+
+set_filter() { set_group_filter "$BEST_GROUP" "$1"; }
+
+set_group_filter() { # group, new filter regex ("" = all servers)
+    grp="$1"; want="$2"
+    if ! has_group "$grp"; then
+        log "group $grp is not in the config (re-save the subscription settings in the app)"
+        return 0
+    fi
+    cur="$(yq -r "(.[\"proxy-groups\"][] | select(.name == \"$grp\")).filter // \"\"" "$CFG" 2>/dev/null)"
     [ "$cur" = "null" ] && cur=""
-    if [ "$cur" = "$want" ]; then log "filter unchanged"; return 0; fi
+    if [ "$cur" = "$want" ]; then log "$grp filter unchanged"; return 0; fi
     staged="$CFG.xk-sub.tmp"
     cp -p "$CFG" "$staged" || die "cannot stage config"
     if [ -n "$want" ]; then
-        XK_FILTER="$want" yq -i "(.[\"proxy-groups\"][] | select(.name == \"$BEST_GROUP\")).filter = strenv(XK_FILTER)" "$staged"
+        XK_FILTER="$want" yq -i "(.[\"proxy-groups\"][] | select(.name == \"$grp\")).filter = strenv(XK_FILTER)" "$staged"
     else
-        yq -i "del(.[\"proxy-groups\"][] | select(.name == \"$BEST_GROUP\") | .filter)" "$staged"
+        yq -i "del(.[\"proxy-groups\"][] | select(.name == \"$grp\") | .filter)" "$staged"
     fi || { rm -f "$staged"; die "yq failed"; }
     if ! mihomo -t -d "$CFG_DIR" -f "$staged" >/dev/null 2>&1; then
         rm -f "$staged"; die "new config failed mihomo -t"
@@ -174,7 +199,7 @@ set_filter() { # new filter regex ("" = all servers)
     mv "$staged" "$CFG" || die "cannot install config"
     code="$(api_code PUT '/configs?force=true' "$(jq -cn --arg p "$CFG" '{path:$p}')" 30)"
     case "$code" in
-        2*) log "config reloaded with new $BEST_GROUP filter" ;;
+        2*) log "config reloaded with new $grp filter" ;;
         *)  cp -p "$CFG.xk-sub.bak" "$CFG"
             api_code PUT '/configs?force=true' "$(jq -cn --arg p "$CFG" '{path:$p}')" 30 >/dev/null
             die "reload failed (HTTP $code), previous config restored" ;;
@@ -244,9 +269,7 @@ bench() {
     fi
 
     chosen="$(head -n "$TOP_N" "$ranked" | cut -f1)"
-    filter="$(printf '%s\n' "$chosen" | while IFS= read -r n; do regex_escape "$n"; printf '\n'; done \
-        | awk 'NF { s = s (s == "" ? "" : "|") $0 } END { print s }')"
-    filter="^(?:$filter)$"
+    filter="$(printf '%s\n' "$chosen" | names_filter)"
 
     write_result "$ranked" "$chosen"
     set_filter "$filter"
@@ -256,6 +279,72 @@ bench() {
     state_set last_error ""
     log "bench: chose $(printf '%s\n' "$chosen" | wc -l | tr -d ' ') servers"
     rm -f "$res" "$ranked"
+    geo
+}
+
+geo_ok() { # checks the server currently selected in the bench group; prints the failure
+    while IFS='|' read -r url want; do
+        [ -z "$url" ] && continue
+        code="$(curl -sk -m 8 -o /dev/null -w '%{http_code}' -A 'Mozilla/5.0' \
+            -x "socks5h://127.0.0.1:$BENCH_PORT" "$url" 2>/dev/null)"
+        case " $want " in *" $code "*) ;; *) echo "$url -> $code"; return 1 ;; esac
+    done <<XK_GEO_CHECKS
+$GEO_CHECKS
+XK_GEO_CHECKS
+    return 0
+}
+
+# Picks GEO_N servers that geo-blocking services accept, fastest by the last bench first.
+geo() {
+    mihomo_up || { log "geo: mihomo is not reachable"; return 1; }
+    has_group "$GEO_GROUP" || { log "geo: $GEO_GROUP is not in the config yet (re-save the subscription settings in the app)"; return 0; }
+    alive="/tmp/xk-geo.alive.$$"; order="/tmp/xk-geo.order.$$"; rows="/tmp/xk-geo.rows.$$"
+    servers="/tmp/xk-geo.servers.$$"; seen="/tmp/xk-geo.seen.$$"; : > "$seen"
+    server_map > "$servers" 2>/dev/null
+    api GET "/providers/proxies/$PROVIDER" "" 20 | jq -r '.proxies[]
+        | select((.history | length) > 0 and (.history | last | .delay) > 0)
+        | [(.history | last | .delay), .name] | @tsv' | sort -n | cut -f2- > "$alive"
+    { [ -s "$RESULT" ] && jq -r '.servers | sort_by(-(.down + 2 * .up)) | .[].name' "$RESULT" 2>/dev/null
+      cat "$alive"; } | awk '!seen[$0]++' > "$order"
+    : > "$rows"; found=0; tested=0
+    while IFS= read -r name; do
+        { [ "$found" -ge "$GEO_N" ] || [ "$tested" -ge "$GEO_MAX_TESTS" ]; } && break
+        grep -qxF "$name" "$alive" || continue
+        case "$name" in *'`'*) continue ;; esac
+        # Providers list one server under several names; keep each server once.
+        srv="$(awk -F '\t' -v n="$name" '$1 == n { print $2; exit }' "$servers")"
+        if [ -n "$srv" ]; then
+            grep -qxF "$srv" "$seen" && continue
+            echo "$srv" >> "$seen"
+        fi
+        code="$(api_code PUT "/proxies/$BENCH_GROUP" "$(json_name "$name")" 10)"
+        case "$code" in 2*) ;; *) continue ;; esac
+        tested=$((tested + 1))
+        if why="$(geo_ok)"; then
+            found=$((found + 1)); printf '%s\t1\t\n' "$name" >> "$rows"; log "geo: ok $name"
+        else
+            printf '%s\t0\t%s\n' "$name" "$why" >> "$rows"; log "geo: blocked $name ($why)"
+        fi
+    done < "$order"
+    jq -R -s --arg ts "$(date +%s)" '{ ts: ($ts | tonumber), servers: (split("\n") | map(select(length > 0)
+        | split("\t") | { name: .[0], ok: (.[1] == "1"), reason: (.[2] // "") })) }' "$rows" > "$GEO_RESULT.tmp" \
+        && mv "$GEO_RESULT.tmp" "$GEO_RESULT"
+    if [ "$found" -gt 0 ]; then
+        set_group_filter "$GEO_GROUP" "$(awk -F '\t' '$2 == "1" { print $1 }' "$rows" | names_filter)"
+        state_set last_geo "$(date +%s)"
+        log "geo: $found servers accepted by all services"
+    else
+        log "geo: no server passed the checks, keeping the previous $GEO_GROUP selection"
+    fi
+    rm -f "$alive" "$order" "$rows" "$servers" "$seen"
+}
+
+geo_alive() {
+    members="$(api GET "/proxies/$GEO_GROUP" "" 10 | jq -r '.all[]?' 2>/dev/null)"
+    [ -z "$members" ] && { echo 0; return; }
+    api GET "/providers/proxies/$PROVIDER" "" 20 | jq --arg m "$members" '
+        ($m | split("\n")) as $names
+        | [.proxies[] | select(.name as $n | $names | index($n) != null) | select(.alive == true)] | length' 2>/dev/null || echo 0
 }
 
 write_result() { # file-with-rows chosen-names
@@ -317,7 +406,14 @@ cmd_check() {
         now="$(date +%s)"
         [ -z "$last" ] || [ $((now - ${last:-0})) -gt $((REBENCH_DAYS * 86400)) ] && reason="periodic re-check"
     fi
-    [ -z "$reason" ] && exit 0
+    if [ -z "$reason" ]; then
+        # Geo group: re-check (no speed test) when it was never checked or nothing in it answers.
+        if has_group "$GEO_GROUP" && { [ -z "$(state_get last_geo)" ] || [ "$(geo_alive)" -lt 1 ]; }; then
+            log "check: geo servers need a re-check"
+            geo
+        fi
+        exit 0
+    fi
     log "check: $reason"
     bench
 }
@@ -333,8 +429,9 @@ cmd_status() {
         --arg last_error "$(state_get last_error)" \
         --arg log "$(tail -n 15 "$LOG" 2>/dev/null)" \
         --slurpfile result "$( [ -s "$RESULT" ] && echo "$RESULT" || echo /dev/null )" \
+        --slurpfile geo "$( [ -s "$GEO_RESULT" ] && echo "$GEO_RESULT" || echo /dev/null )" \
         '{ running: $running, last_update: $last_update, last_bench: $last_bench,
-           last_error: $last_error, log: $log, result: ($result[0] // null) }'
+           last_error: $last_error, log: $log, result: ($result[0] // null), geo: ($geo[0] // null) }'
 }
 
 mkdir -p "$XK_DIR"
@@ -342,6 +439,7 @@ case "$1" in
     daily) cmd_daily ;;
     check) cmd_check ;;
     bench) lock; bench ;;
+    geo) has_provider || exit 0; lock; geo ;;
     status) cmd_status ;;
-    *) echo "usage: $0 daily|check|bench|status" >&2; exit 2 ;;
+    *) echo "usage: $0 daily|check|bench|geo|status" >&2; exit 2 ;;
 esac

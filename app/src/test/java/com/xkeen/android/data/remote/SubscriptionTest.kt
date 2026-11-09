@@ -39,7 +39,11 @@ class SubscriptionEditorTest {
         @Suppress("UNCHECKED_CAST")
         val rules = result["rules"] as List<String>
         assertEquals(SubscriptionNames.BENCH_RULE, rules.first())
-        assertEquals(before["rules"], rules.drop(1))
+        assertEquals(SubscriptionNames.GEO_RULES, rules.drop(1).take(SubscriptionNames.GEO_RULES.size))
+        assertTrue(rules.contains("DOMAIN-SUFFIX,elevenlabs.io,SUB-GEO"))
+        assertEquals(before["rules"], rules.drop(1 + SubscriptionNames.GEO_RULES.size))
+        assertEquals(listOf(SubscriptionNames.PROVIDER), groups.getValue(SubscriptionNames.GEO)["use"])
+        assertEquals("url-test", groups.getValue(SubscriptionNames.GEO)["type"])
     }
 
     @Test fun `enable twice is idempotent and keeps the benchmark filter`() {
@@ -54,7 +58,9 @@ class SubscriptionEditorTest {
         assertEquals(listOf(SubscriptionNames.BEST, SubscriptionNames.ALL, "AUTO", "proxy-old"), groups.first { it["name"] == "PROXY" }["proxies"])
         assertEquals(1, entries(twice, "listeners").size)
         @Suppress("UNCHECKED_CAST")
-        assertEquals(1, (twice["rules"] as List<String>).count { it == SubscriptionNames.BENCH_RULE })
+        val twiceRules = twice["rules"] as List<String>
+        assertEquals(1, twiceRules.count { it == SubscriptionNames.BENCH_RULE })
+        assertEquals(1, twiceRules.count { it == "DOMAIN-SUFFIX,elevenlabs.io,SUB-GEO" })
         assertEquals("https://other.example.com/sub", editor.subscriptionUrl(editor.enableSubscription(withFilter, "https://other.example.com/sub")))
     }
 
@@ -89,7 +95,7 @@ class SubscriptionEditorTest {
         val enabled = editor.enableSubscription(MIHOMO_CONFIG, SUB_URL)
         @Suppress("UNCHECKED_CAST")
         val rules = parseYaml(editor.replaceRules(enabled, listOf("GEOSITE,category-ru,DIRECT", "MATCH,PROXY")))["rules"] as List<String>
-        assertEquals(listOf(SubscriptionNames.BENCH_RULE, "GEOSITE,category-ru,DIRECT", "MATCH,PROXY"), rules)
+        assertEquals(listOf(SubscriptionNames.BENCH_RULE) + SubscriptionNames.GEO_RULES + listOf("GEOSITE,category-ru,DIRECT", "MATCH,PROXY"), rules)
         @Suppress("UNCHECKED_CAST")
         val plain = parseYaml(editor.replaceRules(MIHOMO_CONFIG, listOf("MATCH,PROXY")))["rules"] as List<String>
         assertEquals(listOf("MATCH,PROXY"), plain)
@@ -112,11 +118,13 @@ class SubscriptionEditorTest {
     @Test fun `regenerating the config keeps the subscription and its benchmark filter`() {
         val withSub = editor.enableSubscription(MIHOMO_CONFIG, SUB_URL)
             .replace("name: SUB-BEST", "name: SUB-BEST\n  filter: ^(?:a|b)$")
+            .replace("name: SUB-GEO", "name: SUB-GEO\n  filter: ^(?:g)$")
         val regenerated = MIHOMO_CONFIG.replace("proxy-old", "proxy-fresh")
         val carried = parseYaml(editor.carrySubscription(withSub, regenerated))
         assertEquals(SUB_URL, editor.subscriptionUrl(editor.carrySubscription(withSub, regenerated)))
         val groups = entries(carried, "proxy-groups").associateBy { it["name"] }
         assertEquals("^(?:a|b)$", groups.getValue(SubscriptionNames.BEST)["filter"])
+        assertEquals("^(?:g)$", groups.getValue(SubscriptionNames.GEO)["filter"])
         assertEquals(listOf(SubscriptionNames.BEST, SubscriptionNames.ALL, "AUTO", "proxy-fresh"), groups.getValue("PROXY")["proxies"])
         // No subscription before: the generated config is returned untouched.
         assertSame(regenerated, editor.carrySubscription(MIHOMO_CONFIG, regenerated))
@@ -184,6 +192,15 @@ class SubscriptionRemoteTest {
         assertEquals(listOf("Sweden #4", "Poland"), status.chosen.map { it.name })
         assertEquals("Estonia #2", status.servers.last().name)
         assertEquals(183.5, status.chosen.first().upMbit, 0.01)
+    }
+
+    @Test fun `geo results are parsed`() {
+        val body = """{"running":false,"result":null,"geo":{"ts":1,"servers":[
+            {"name":"Poland","ok":true,"reason":""},
+            {"name":"Estonia #1","ok":false,"reason":"https://elevenlabs.io/ -> 302"}]}}"""
+        val status = remote.parseStatusJson(body, SubscriptionStatus(enabled = true, geoGroup = true))
+        assertEquals(listOf("Poland"), status.geoOk.map { it.name })
+        assertEquals("https://elevenlabs.io/ -> 302", status.geoServers.last().reason)
     }
 
     @Test fun `status without results or with garbage keeps the base`() {

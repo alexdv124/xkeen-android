@@ -19,6 +19,8 @@ internal class MihomoConfigEditor {
         it["type"] in setOf("select", "url-test", "fallback", "load-balance") && name(it) !in SubscriptionNames.GROUPS
     }.map { name(it) }
 
+    fun hasGroup(raw: String, group: String): Boolean = maps(document(raw)["proxy-groups"]).any { name(it) == group }
+
     /** URL of the app-managed subscription provider, or null when none is configured. */
     fun subscriptionUrl(raw: String): String? {
         val providers = document(raw)["proxy-providers"] as? Map<*, *> ?: return null
@@ -95,6 +97,17 @@ internal class MihomoConfigEditor {
             "tolerance" to 50,
             "lazy" to false
         )
+        val geo = linkedMapOf<String, Any?>(
+            "name" to SubscriptionNames.GEO,
+            "type" to "url-test",
+            "use" to listOf(SubscriptionNames.PROVIDER),
+            "url" to SubscriptionNames.TEST_URL,
+            "interval" to 300,
+            "tolerance" to 50,
+            "lazy" to false
+        )
+        (groups.firstOrNull { name(it) == SubscriptionNames.GEO }?.get("filter") as? String)
+            ?.takeIf { it.isNotBlank() }?.let { geo["filter"] = it }
         val bench = linkedMapOf<String, Any?>(
             "name" to SubscriptionNames.BENCH,
             "type" to "select",
@@ -115,10 +128,11 @@ internal class MihomoConfigEditor {
         } else {
             listOf(linkedMapOf<String, Any?>("name" to "PROXY", "type" to "select", "proxies" to front)) + kept
         }
-        config["proxy-groups"] = updated + listOf(best, all, bench)
+        config["proxy-groups"] = updated + listOf(best, all, geo, bench)
 
-        val rules = (config["rules"] as? List<*>).orEmpty().filterNot { it == SubscriptionNames.BENCH_RULE }
-        config["rules"] = listOf(SubscriptionNames.BENCH_RULE) + rules.ifEmpty { listOf("MATCH,PROXY") }
+        val rules = (config["rules"] as? List<*>).orEmpty().filterNot { SubscriptionNames.isManagedRule(it) }
+        config["rules"] = listOf(SubscriptionNames.BENCH_RULE) + SubscriptionNames.GEO_RULES +
+            rules.ifEmpty { listOf("MATCH,PROXY") }
         return yaml.dump(config)
     }
 
@@ -146,7 +160,7 @@ internal class MihomoConfigEditor {
         }
         config["proxy-groups"] = groups
         (config["rules"] as? List<*>)?.let { rules ->
-            config["rules"] = rules.filterNot { it == SubscriptionNames.BENCH_RULE }
+            config["rules"] = rules.filterNot { SubscriptionNames.isManagedRule(it) }
         }
         return yaml.dump(config)
     }
@@ -158,12 +172,12 @@ internal class MihomoConfigEditor {
     fun carrySubscription(oldRaw: String, newRaw: String): String {
         val old = runCatching { document(oldRaw) }.getOrNull() ?: return newRaw
         val url = runCatching { subscriptionUrl(oldRaw) }.getOrNull() ?: return newRaw
-        val filter = maps(old["proxy-groups"]).firstOrNull { name(it) == SubscriptionNames.BEST }?.get("filter") as? String
+        val filters = maps(old["proxy-groups"])
+            .filter { name(it) in SubscriptionNames.GROUPS && (it["filter"] as? String)?.isNotBlank() == true }
+            .associate { name(it) to it["filter"] }
         val withSub = document(enableSubscription(newRaw, url))
-        if (!filter.isNullOrBlank()) {
-            withSub["proxy-groups"] = maps(withSub["proxy-groups"]).map { group ->
-                if (name(group) == SubscriptionNames.BEST) group.toMutableMap().apply { put("filter", filter) } else group
-            }
+        withSub["proxy-groups"] = maps(withSub["proxy-groups"]).map { group ->
+            filters[name(group)]?.let { f -> group.toMutableMap().apply { put("filter", f) } } ?: group
         }
         return yaml.dump(withSub)
     }
@@ -275,8 +289,9 @@ internal class MihomoConfigEditor {
         }
         // The subscription benchmark depends on its listener rule being first; routing presets
         // must not drop it.
-        val keepBench = (config["rules"] as? List<*>)?.contains(SubscriptionNames.BENCH_RULE) == true
-        config["rules"] = if (keepBench) listOf(SubscriptionNames.BENCH_RULE) + rules.filterNot { it == SubscriptionNames.BENCH_RULE } else rules
+        // Same for the geo-service rules routed to SUB-GEO.
+        val managed = (config["rules"] as? List<*>).orEmpty().filter { SubscriptionNames.isManagedRule(it) }
+        config["rules"] = managed + rules.filterNot { SubscriptionNames.isManagedRule(it) }
         return yaml.dump(config)
     }
 
