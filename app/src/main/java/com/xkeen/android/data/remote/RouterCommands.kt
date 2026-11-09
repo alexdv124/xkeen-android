@@ -27,19 +27,26 @@ object Paths {
 
 class RouterCommands(private val ssh: SshConnection) {
 
+    private companion object {
+        const val MIHOMO_BACKUP_NAME = "mihomo-config.yaml"
+        val BACKUP_NAME = Regex("""^\d{8}_\d{6}$""")
+    }
+
     private data class ProcessInfo(
         val running: Boolean = false,
         val pid: String = "",
         val mem: String = ""
     )
 
+    /** Parses "PID RSS_KB" — resident memory, not the multi-GB virtual size Go processes show in ps. */
     private fun parseProcessInfo(out: String): ProcessInfo {
         val line = out.lineSequence().firstOrNull { it.isNotBlank() } ?: return ProcessInfo()
         val parts = line.trim().split(Regex("\\s+"))
+        val rssKb = parts.getOrNull(1)?.toLongOrNull()
         return ProcessInfo(
             running = true,
             pid = parts.getOrElse(0) { "" },
-            mem = parts.getOrElse(2) { "" }
+            mem = rssKb?.let { "${(it + 512) / 1024} МБ" }.orEmpty()
         )
     }
 
@@ -47,8 +54,7 @@ class RouterCommands(private val ssh: SshConnection) {
         val out = ssh.exec(
             "pid=\"\$(pidof $processName 2>/dev/null | cut -d' ' -f1)\"; " +
                 "if [ -n \"\$pid\" ]; then " +
-                "line=\"\$(ps | grep \"^ *\$pid \")\"; " +
-                "[ -n \"\$line\" ] && echo \"\$line\" || echo \"\$pid\"; " +
+                "echo \"\$pid \$(awk '/^VmRSS:/{print \$2}' /proc/\$pid/status 2>/dev/null)\"; " +
                 "fi"
         ).stdout
         return parseProcessInfo(out)
@@ -140,7 +146,10 @@ class RouterCommands(private val ssh: SshConnection) {
         status = status.copy(uptime = uptimeOut)
 
         // xkeen version
-        val verOut = ssh.exec("xkeen -v 2>/dev/null || echo unknown").stdout.trim()
+        // "XKeen 2.1 Stable (время сборки: …)" plus core lines with ANSI colours: keep the name/version.
+        val verOut = cleanTerminalOutput(ssh.exec("xkeen -v 2>/dev/null").stdout)
+            .lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() }
+            ?.substringBefore(" (")?.trim().orEmpty()
         status = status.copy(xkeenVersion = verOut)
 
         return status
@@ -215,8 +224,10 @@ class RouterCommands(private val ssh: SshConnection) {
                 if (configPath.isBlank()) {
                     ConfigTestResult(false, "Конфиг Mihomo не найден в /opt/etc/mihomo")
                 } else {
+                    // -d: relative provider/geodata paths resolve against the config directory,
+                    // exactly as for the running core.
                     val result = ssh.exec(
-                        "mihomo -t -f \"$configPath\" 2>&1",
+                        "mihomo -t -d ${shellQuote(configPath.substringBeforeLast('/'))} -f ${shellQuote(configPath)} 2>&1",
                         timeout = 30000
                     )
                     val out = result.stdout
@@ -249,9 +260,10 @@ class RouterCommands(private val ssh: SshConnection) {
 
     suspend fun installOrUpdateMihomo(): CoreSwitchResult {
         val backupId = backupCoreConfigs()
-        val out = cleanTerminalOutput(
-            ssh.exec("printf '1\\n' | xkeen -um 2>&1", timeout = 240000).stdout
-        )
+        // Non-interactive install of the latest release when xkeen supports it.
+        val auto = ssh.exec("grep -q 'get_auto_arg' /opt/sbin/xkeen 2>/dev/null && echo yes").stdout.trim() == "yes"
+        val command = if (auto) "xkeen -um auto </dev/null 2>&1" else "printf '1\\n' | xkeen -um 2>&1"
+        val out = cleanTerminalOutput(ssh.exec(command, timeout = 600000).stdout)
         delay(1000)
         val state = getCoreState(withConfigTests = false)
         return if (state.mihomoInstalled) {
@@ -470,6 +482,23 @@ class RouterCommands(private val ssh: SshConnection) {
         )
     }
 
+    suspend fun readTail(path: String, lines: Int = 200): String =
+        ssh.exec("tail -n $lines ${shellQuote(path)} 2>/dev/null").stdout
+
+    /** Live Mihomo connections: client → host:port, chain and matched rule. */
+    suspend fun getMihomoConnections(): String {
+        val c = MihomoApi(ssh).resolveController()
+        val auth = if (c.secret.isNotBlank()) "-H ${shellQuote("Authorization: Bearer ${c.secret}")} " else ""
+        val out = ssh.exec(
+            "curl -sS -m 10 $auth'http://${c.base}/connections' | jq -r '" +
+                ".connections // [] | sort_by(.start) | reverse | .[] | " +
+                "\"\\(.metadata.sourceIP) → \\(if (.metadata.host // \"\") != \"\" then .metadata.host else .metadata.destinationIP end):\\(.metadata.destinationPort) " +
+                "[\\(.chains | reverse | join(\" → \"))] \\(.rule),\\(.rulePayload)\"' 2>&1",
+            timeout = 20000
+        ).stdout
+        return out.ifBlank { "Нет активных соединений" }
+    }
+
     suspend fun getLog(logType: String, lines: Int = 200): String {
         val path = "${Paths.LOG_DIR}/$logType.log"
         return ssh.exec("tail -$lines $path 2>/dev/null").stdout
@@ -486,6 +515,15 @@ class RouterCommands(private val ssh: SshConnection) {
             ok = "Configuration OK" in out,
             output = out
         )
+    }
+
+    /** Really restarts xkeen with the active core (unlike [restartXkeen] in Mihomo mode). */
+    suspend fun restartProxy(): Pair<Boolean, String> {
+        try {
+            ssh.exec("/opt/etc/init.d/S99xkeen restart 2>&1", timeout = 60000)
+        } catch (_: Exception) { }
+        val state = waitForCore(getCoreState().activeCore.takeIf { it != ProxyCore.UNKNOWN } ?: ProxyCore.UNKNOWN, attempts = 6)
+        return state.activeRunning to "${state.activeTitle} ${if (state.activeRunning) "перезапущен" else "не запустился!"}"
     }
 
     suspend fun restartXkeen(): Pair<Boolean, String> {
@@ -712,29 +750,76 @@ fi
     suspend fun backupConfigs(): String {
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val backupDir = "${Paths.CONFIGS_DIR}/backups/$timestamp"
-        ssh.exec("mkdir -p $backupDir")
-        ssh.exec("cp ${Paths.CONFIGS_DIR}/*.json $backupDir/")
+        val mihomo = findMihomoConfigPath()
+        val result = ssh.exec(
+            "mkdir -p $backupDir && " +
+                "{ cp ${Paths.CONFIGS_DIR}/*.json $backupDir/ 2>/dev/null; " +
+                (if (mihomo.isNotBlank()) "cp ${shellQuote(mihomo)} $backupDir/$MIHOMO_BACKUP_NAME 2>/dev/null; " else "") +
+                "ls $backupDir | grep -q . && echo OK; }"
+        )
+        check("OK" in result.stdout) { "Не удалось создать бекап: нечего сохранять или нет места" }
         return timestamp
     }
 
     suspend fun listBackups(): List<String> {
         val out = ssh.exec("ls -1 ${Paths.CONFIGS_DIR}/backups/ 2>/dev/null").stdout.trim()
         if (out.isEmpty()) return emptyList()
-        return out.lines().filter { it.isNotBlank() }.sortedDescending()
+        // Only timestamped backups made by "Создать бекап"; delete-<uuid> dirs are internal.
+        return out.lines().map { it.trim() }.filter { BACKUP_NAME.matches(it) }.sortedDescending()
     }
 
+    /**
+     * Restores a backup made by [backupConfigs] and applies it to the active core.
+     * Xray JSON is tested before the running proxy is restarted; a Mihomo config is tested
+     * before it replaces the current one and is then hot-reloaded.
+     */
     suspend fun restoreBackup(timestamp: String): Pair<Boolean, String> {
+        require(BACKUP_NAME.matches(timestamp)) { "Некорректное имя бекапа" }
         val backupDir = "${Paths.CONFIGS_DIR}/backups/$timestamp"
-        val check = ssh.exec("ls $backupDir/*.json 2>/dev/null").stdout.trim()
-        if (check.isEmpty()) return Pair(false, "Backup not found")
+        val listing = ssh.exec("ls $backupDir 2>/dev/null").stdout.lines().map { it.trim() }
+        val hasJson = listing.any { it.endsWith(".json") }
+        val hasMihomo = MIHOMO_BACKUP_NAME in listing
+        if (!hasJson && !hasMihomo) return false to "Бекап не найден"
+        val core = getCoreState().activeCore
+        val messages = mutableListOf<String>()
 
-        ssh.exec("cp $backupDir/*.json ${Paths.CONFIGS_DIR}/")
-        val test = testConfig()
-        return if (test.ok) {
-            Pair(true, "Restored from $timestamp")
-        } else {
-            Pair(false, "Restored but config test failed: ${test.output.takeLast(200)}")
+        if (hasJson) {
+            val safety = backupConfigs()
+            ssh.exec("cp $backupDir/*.json ${Paths.CONFIGS_DIR}/")
+            val test = testConfig()
+            if (!test.ok && core != ProxyCore.MIHOMO) {
+                ssh.exec("cp ${Paths.CONFIGS_DIR}/backups/$safety/*.json ${Paths.CONFIGS_DIR}/")
+                return false to "Конфиг Xray из бекапа не прошёл проверку, изменения отменены: ${test.output.takeLast(200)}"
+            }
+            messages += if (test.ok) "Xray восстановлен" else "Xray восстановлен, но проверка конфига не прошла"
         }
+        if (hasMihomo) {
+            val path = findMihomoConfigPath().ifBlank { Paths.MIHOMO_CONFIG }
+            val dir = path.substringBeforeLast('/')
+            val test = ssh.exec(
+                "mihomo -t -d ${shellQuote(dir)} -f $backupDir/$MIHOMO_BACKUP_NAME 2>&1", timeout = 30000
+            )
+            if (test.exitCode != 0) {
+                messages += "конфиг Mihomo из бекапа не прошёл проверку и не восстановлен"
+            } else {
+                ssh.exec("cp -p ${shellQuote(path)} ${shellQuote("$path.before-restore")} 2>/dev/null; " +
+                    "cp $backupDir/$MIHOMO_BACKUP_NAME ${shellQuote(path)}")
+                messages += "Mihomo восстановлен"
+            }
+        }
+        val applied = when (core) {
+            ProxyCore.MIHOMO -> {
+                val path = findMihomoConfigPath()
+                runCatching { MihomoApi(ssh).reloadConfig(path) }.getOrDefault(false)
+            }
+            else -> {
+                ssh.exec("/opt/etc/init.d/S99xkeen restart 2>&1", timeout = 30000)
+                delay(4000)
+                getCoreState().activeRunning
+            }
+        }
+        messages += if (applied) "применено (${core.title})" else "перезапустите прокси, чтобы применить"
+        return true to "Бекап $timestamp: " + messages.joinToString(", ")
     }
 
     suspend fun readAllConfigs(): Map<String, String> {
@@ -744,6 +829,8 @@ fi
             try { ssh.readFile("${Paths.CONFIGS_DIR}/$f") } catch (_: Exception) { "" }
         }
     }
+
+    private fun shellQuote(value: String): String = "'" + value.replace("'", "'\\''") + "'"
 
     suspend fun writeAllConfigs(configs: Map<String, String>) {
         for ((file, content) in configs) {

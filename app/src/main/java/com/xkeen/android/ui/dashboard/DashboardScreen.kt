@@ -15,6 +15,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.xkeen.android.data.remote.DiagStatus
 import com.xkeen.android.data.remote.DiagnosticReport
+import com.xkeen.android.data.remote.MihomoApi
+import com.xkeen.android.data.remote.MihomoNode
+import com.xkeen.android.domain.model.ProxyCore
 import com.xkeen.android.data.remote.RouterCommands
 import com.xkeen.android.data.remote.XrayConfigRemote
 import com.xkeen.android.data.ssh.SshClient
@@ -38,6 +41,9 @@ fun DashboardScreen(sshClient: SshClient?) {
     var setupVlessLinks by remember { mutableStateOf("") }
     var setupLoading by remember { mutableStateOf(false) }
     var setupMessage by remember { mutableStateOf<String?>(null) }
+    // Mihomo: selection chain (PROXY → group → server) and the members of the deciding group.
+    var mihomoChain by remember { mutableStateOf<List<String>>(emptyList()) }
+    var mihomoMembers by remember { mutableStateOf<List<MihomoNode>>(emptyList()) }
 
     fun refresh() {
         if (sshClient == null) return
@@ -46,8 +52,26 @@ fun DashboardScreen(sshClient: SshClient?) {
             try {
                 val cmds = RouterCommands(sshClient)
                 val s = cmds.getStatus()
-                val obs = try { cmds.getObservatoryState() } catch (_: Exception) { ObservatoryState() }
-                status = s.copy(observatory = obs)
+                if (s.activeCore == ProxyCore.MIHOMO) {
+                    // The Xray observatory logs are stale under Mihomo; ask Mihomo itself.
+                    status = s.copy(observatory = ObservatoryState())
+                    try {
+                        val nodes = MihomoApi(sshClient).getProxies()
+                        val chain = mutableListOf<String>()
+                        var cur = nodes["PROXY"]?.takeIf { it.isGroup } ?: nodes["GLOBAL"]
+                        while (cur != null && chain.size < 8 && cur.name !in chain) {
+                            chain += cur.name
+                            cur = if (cur.isGroup && cur.now.isNotBlank()) nodes[cur.now] else null
+                        }
+                        mihomoChain = chain
+                        val decider = chain.map { nodes[it] }.lastOrNull { it?.isGroup == true }
+                        mihomoMembers = decider?.all.orEmpty().mapNotNull { nodes[it] }
+                    } catch (_: Exception) { mihomoChain = emptyList(); mihomoMembers = emptyList() }
+                } else {
+                    val obs = try { cmds.getObservatoryState() } catch (_: Exception) { ObservatoryState() }
+                    status = s.copy(observatory = obs)
+                    mihomoChain = emptyList(); mihomoMembers = emptyList()
+                }
                 try { externalIp = cmds.getExternalIp().directIp } catch (_: Exception) {}
                 // Check if initial setup needed
                 try { setupState = XrayConfigRemote(sshClient).checkSetupState() } catch (_: Exception) {}
@@ -198,6 +222,8 @@ fun DashboardScreen(sshClient: SshClient?) {
                     }
                 }
 
+                UpdatesCard(sshClient, onUpdated = { refresh() })
+
                 // System stats
                 Card(Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
@@ -243,7 +269,9 @@ fun DashboardScreen(sshClient: SshClient?) {
 
                 // Server Health
                 val obs = s.observatory
-                Card(Modifier.fillMaxWidth(),
+                if (s.activeCore == ProxyCore.MIHOMO) {
+                    MihomoServersCard(mihomoChain, mihomoMembers)
+                } else Card(Modifier.fillMaxWidth(),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
                     Column(Modifier.padding(16.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -428,5 +456,56 @@ fun DashboardScreen(sshClient: SshClient?) {
                 TextButton(onClick = { showSetupWizard = false }, enabled = !setupLoading) { Text("Отмена") }
             }
         )
+    }
+}
+
+@Composable
+private fun MihomoServersCard(chain: List<String>, members: List<MihomoNode>) {
+    Card(Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Dns, null, Modifier.size(20.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Серверы", fontWeight = FontWeight.SemiBold)
+            }
+            Spacer(Modifier.height(6.dp))
+            if (chain.isEmpty()) {
+                Text("Нет данных от Mihomo", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                return@Column
+            }
+            Text("Сейчас: " + chain.joinToString(" → "), style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(6.dp))
+            val active = chain.last()
+            members.take(15).forEach { n ->
+                val alive = n.isGroup || n.delayMs > 0
+                Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Surface(
+                        modifier = Modifier.size(8.dp),
+                        shape = MaterialTheme.shapes.extraSmall,
+                        color = when {
+                            n.name == active -> MaterialTheme.colorScheme.primary
+                            alive -> Color(0xFF4CAF50)
+                            else -> MaterialTheme.colorScheme.error
+                        }
+                    ) {}
+                    Spacer(Modifier.width(8.dp))
+                    Text(n.name, style = MaterialTheme.typography.bodySmall, maxLines = 1,
+                        fontWeight = if (n.name == active) FontWeight.Bold else FontWeight.Normal,
+                        modifier = Modifier.weight(1f))
+                    Text(
+                        when { n.isGroup -> "группа"; n.delayMs > 0 -> "${n.delayMs} ms"; else -> "нет ответа" },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (alive) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+            if (members.size > 15) {
+                Text("…и ещё ${members.size - 15}", style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
     }
 }

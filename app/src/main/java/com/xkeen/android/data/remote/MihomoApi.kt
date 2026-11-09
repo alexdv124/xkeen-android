@@ -99,7 +99,33 @@ class MihomoApi(private val ssh: SshConnection) {
             val isGroup = all.isNotEmpty() || type in GROUP_TYPES
             result[name] = MihomoNode(name, type, now, all, delay, isGroup)
         }
+        // Servers that come from proxy-providers (subscriptions) are not listed by /proxies.
+        if (result.values.any { it.isGroup && it.all.any { member -> member !in result } }) {
+            providerNodes().forEach { node -> result.putIfAbsent(node.name, node) }
+        }
         return result
+    }
+
+    /** Servers of all proxy-providers (GET /providers/proxies). */
+    suspend fun providerNodes(): List<MihomoNode> {
+        val resp = curl("GET", "/providers/proxies")
+        val providers = runCatching {
+            json.parseToJsonElement(resp.body).jsonObject["providers"]?.jsonObject
+        }.getOrNull() ?: return emptyList()
+        return providers.values.flatMap { provider ->
+            val list = runCatching { provider.jsonObject["proxies"]?.jsonArray }.getOrNull() ?: return@flatMap emptyList()
+            list.mapNotNull { el ->
+                val obj = runCatching { el.jsonObject }.getOrNull() ?: return@mapNotNull null
+                val name = obj["name"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                val type = obj["type"]?.jsonPrimitive?.contentOrNull ?: ""
+                if (type in GROUP_TYPES) return@mapNotNull null
+                val delay = obj["history"]?.let { runCatching { it.jsonArray }.getOrNull() }
+                    ?.lastOrNull()
+                    ?.let { runCatching { it.jsonObject["delay"]?.jsonPrimitive?.intOrNull }.getOrNull() }
+                    ?: 0
+                MihomoNode(name, type, delayMs = delay)
+            }
+        }
     }
 
     /** Currently selected member of [group], or empty if it is not a selector. */

@@ -56,42 +56,42 @@ fun MainApp(database: AppDatabase) {
     var showRouterMenu by remember { mutableStateOf(false) }
     var connectionStatus by remember { mutableStateOf("") }
 
-    // Load profiles
-    LaunchedEffect(Unit) {
-        database.routerProfileDao().getAll().collect { entities ->
-            profiles = entities.map { it.toDomain() }
-            if (profiles.isNotEmpty() && activeProfile == null) {
-                // Auto-connect to first profile
-                val first = profiles.first()
-                activeProfile = first
-                connectionStatus = "Подключение..."
-                scope.launch {
-                    try {
-                        val client = SshClient(first)
-                        client.exec("echo ok")
-                        sshClient = client
-                        connectionStatus = ""
-                    } catch (e: Exception) {
-                        connectionStatus = "Ошибка: ${e.message}"
-                    }
-                }
+    var connectAttempt by remember { mutableStateOf(0) }
+
+    fun connectTo(profile: RouterProfile) {
+        // Screens must never keep using the previous router while the new one connects.
+        sshClient?.close()
+        sshClient = null
+        activeProfile = profile
+        connectionStatus = "Подключение..."
+        val attempt = ++connectAttempt
+        scope.launch {
+            val client = SshClient(profile)
+            try {
+                client.exec("echo ok")
+                if (attempt == connectAttempt) {
+                    sshClient = client
+                    connectionStatus = ""
+                } else client.close() // a newer switch superseded this one
+            } catch (e: Exception) {
+                client.close()
+                if (attempt == connectAttempt) connectionStatus = "Ошибка: ${e.message}"
             }
         }
     }
 
-    fun connectTo(profile: RouterProfile) {
-        sshClient?.close()
-        activeProfile = profile
-        connectionStatus = "Подключение..."
-        scope.launch {
-            try {
-                val client = SshClient(profile)
-                client.exec("echo ok")
-                sshClient = client
-                connectionStatus = ""
-            } catch (e: Exception) {
-                connectionStatus = "Ошибка: ${e.message}"
-                sshClient = null
+    // Load profiles
+    LaunchedEffect(Unit) {
+        database.routerProfileDao().getAll().collect { entities ->
+            profiles = entities.map { it.toDomain() }
+            val current = activeProfile
+            when {
+                // Auto-connect to the first profile
+                current == null && profiles.isNotEmpty() -> connectTo(profiles.first())
+                // The active profile was edited (address, port or password): reconnect with new data
+                current != null -> profiles.firstOrNull { it.id == current.id }
+                    ?.takeIf { it != current }
+                    ?.let { connectTo(it) }
             }
         }
     }
@@ -114,12 +114,15 @@ fun MainApp(database: AppDatabase) {
             },
             onDelete = { profile ->
                 scope.launch {
-                    database.routerProfileDao().delete(RouterProfileEntity.fromDomain(profile))
                     if (activeProfile?.id == profile.id) {
+                        connectAttempt++
                         sshClient?.close()
                         sshClient = null
                         activeProfile = null
+                        connectionStatus = ""
                     }
+                    // The profile Flow then auto-connects to the first remaining router.
+                    database.routerProfileDao().delete(RouterProfileEntity.fromDomain(profile))
                 }
             },
             onDismiss = { showSettings = false }

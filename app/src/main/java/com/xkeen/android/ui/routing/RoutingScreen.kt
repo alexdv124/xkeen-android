@@ -644,8 +644,8 @@ fun RoutingScreen(sshClient: SshClient?) {
                     scope.launch {
                         loading = true
                         try {
-                            val (running, _) = RouterCommands(sshClient).restartXkeen()
-                            message = if (running) "Xray перезапущен" else "Не запустился!"
+                            val (_, detail) = RouterCommands(sshClient).restartProxy()
+                            message = detail
                         } catch (e: Exception) { message = e.message }
                         finally { loading = false }
                     }

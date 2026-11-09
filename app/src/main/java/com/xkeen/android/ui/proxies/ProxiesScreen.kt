@@ -17,6 +17,10 @@ import androidx.compose.ui.unit.dp
 import com.xkeen.android.data.remote.MihomoConfigRemote
 import com.xkeen.android.data.remote.MihomoApi
 import com.xkeen.android.data.remote.RouterCommands
+import com.xkeen.android.data.remote.SubscriptionNames
+import com.xkeen.android.data.remote.SubscriptionRemote
+import com.xkeen.android.data.remote.SubscriptionSettings
+import com.xkeen.android.data.remote.SubscriptionStatus
 import com.xkeen.android.data.remote.VlessParser
 import com.xkeen.android.data.remote.XrayServerRemote
 import com.xkeen.android.data.remote.XrayConfigRemote
@@ -46,6 +50,9 @@ fun ProxiesScreen(sshClient: SshClient?) {
     var selectionMode by remember { mutableStateOf(false) }
     var selectedNames by remember { mutableStateOf<Set<String>>(emptySet()) }
     var pendingDeletion by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var subStatus by remember { mutableStateOf<SubscriptionStatus?>(null) }
+    var showSubDialog by remember { mutableStateOf(false) }
+    var confirmSubDisable by remember { mutableStateOf(false) }
 
     suspend fun refresh() {
         if (sshClient == null) return
@@ -68,20 +75,29 @@ fun ProxiesScreen(sshClient: SshClient?) {
                     val selector = nodes["PROXY"]?.takeIf { it.isGroup }
                     val now = selector?.now ?: ""
                     mihomoSelectable = selector != null
-                    val servers = nodes.values.filter {
-                        !it.isGroup && it.type.lowercase() !in setOf("direct", "reject", "rejectdrop", "compatible", "pass")
+                    val hidden = setOf("direct", "reject", "rejectdrop", "compatible", "pass")
+                    // Members of PROXY in their order (groups first as configured), then local
+                    // servers that are not in PROXY, so they stay visible for deletion.
+                    val members = selector?.all.orEmpty().mapNotNull { nodes[it] }
+                    val extra = nodes.values.filter {
+                        !it.isGroup && it.name in deletableNames && it.name !in selector?.all.orEmpty()
                     }
-                    proxies = buildList {
-                        if (selector != null && "AUTO" in selector.all) {
-                            add(ProxyInfo("AUTO", "авто по минимальной задержке", 0, "url-test",
-                                selected = now == "AUTO"))
+                    val listed = if (selector != null) members + extra else nodes.values.filter {
+                        !it.isGroup && it.type.lowercase() !in hidden
+                    }
+                    proxies = listed.filter { it.type.lowercase() !in hidden }.map { n ->
+                        val description = when {
+                            n.name == SubscriptionNames.BEST -> "лучшие из подписки · сейчас: ${n.now}"
+                            n.name == SubscriptionNames.ALL -> "вся подписка, авто · сейчас: ${n.now}"
+                            n.name == "AUTO" && n.isGroup -> "авто · сейчас: ${n.now}"
+                            n.isGroup -> "группа · сейчас: ${n.now}"
+                            else -> ""
                         }
-                        servers.forEach { n ->
-                            add(ProxyInfo(n.name, "", 0, n.type.lowercase(),
-                                selected = n.name == now, delayMs = n.delayMs))
-                        }
+                        ProxyInfo(n.name, description, 0, n.type.lowercase(),
+                            selected = n.name == now, delayMs = if (n.isGroup) 0 else n.delayMs)
                     }
                 }
+                subStatus = try { SubscriptionRemote(sshClient).status() } catch (_: Exception) { null }
             } else {
                 val config = XrayConfigRemote(sshClient)
                 configState = config.detectConfigState()
@@ -126,7 +142,35 @@ fun ProxiesScreen(sshClient: SshClient?) {
         }
     }
 
+    fun subscriptionAction(action: suspend (SubscriptionRemote) -> Pair<Boolean, String>) {
+        val client = sshClient ?: return
+        loading = true
+        scope.launch {
+            try {
+                val (_, msg) = action(SubscriptionRemote(client))
+                actionMessage = msg
+                refresh()
+            } catch (e: Exception) { actionMessage = e.message }
+            finally { loading = false }
+        }
+    }
+
+    // While the router is refreshing/measuring, poll its status and reload the list at the end.
+    LaunchedEffect(sshClient, subStatus?.running) {
+        val client = sshClient ?: return@LaunchedEffect
+        if (subStatus?.running != true) return@LaunchedEffect
+        while (true) {
+            kotlinx.coroutines.delay(5000)
+            val next = try { SubscriptionRemote(client).status() } catch (_: Exception) { null } ?: continue
+            if (!next.running) { refresh(); break }
+            subStatus = next
+        }
+    }
+
     LaunchedEffect(sshClient) {
+        subStatus = null
+        showSubDialog = false
+        confirmSubDisable = false
         showAddSheet = false
         showFailoverDialog = false
         pendingDeletion = emptySet()
@@ -192,6 +236,17 @@ fun ProxiesScreen(sshClient: SshClient?) {
                         }
                         if (activeCore == ProxyCore.MIHOMO) {
                             item {
+                                SubscriptionCard(
+                                    status = subStatus,
+                                    busy = loading,
+                                    onConnect = { showSubDialog = true },
+                                    onSettings = { showSubDialog = true },
+                                    onRefresh = { subscriptionAction { it.refreshNow() } },
+                                    onRebench = { subscriptionAction { it.rebenchNow() } },
+                                    onDisable = { confirmSubDisable = true }
+                                )
+                            }
+                            item {
                                 Card(
                                     modifier = Modifier.fillMaxWidth(),
                                     colors = CardDefaults.cardColors(
@@ -203,7 +258,7 @@ fun ProxiesScreen(sshClient: SshClient?) {
                                         Text("Ядро: Mihomo", fontWeight = FontWeight.SemiBold)
                                         if (mihomoSelectable) {
                                             Text(
-                                                "Нажмите на сервер, чтобы выбрать его вручную. AUTO — выбор по минимальной задержке.",
+                                                "Нажмите на сервер или группу, чтобы выбрать вручную. Группы переключаются между серверами сами.",
                                                 style = MaterialTheme.typography.bodySmall
                                             )
                                             Spacer(Modifier.height(8.dp))
@@ -287,7 +342,7 @@ fun ProxiesScreen(sshClient: SshClient?) {
                                 showDelete = canDelete && !loading && !selectionMode,
                                 checked = if (selectionMode && canDelete) proxy.tag in selectedNames else null,
                                 onCheckedChange = if (!loading) toggleSelection else null,
-                                fromSubscription = activeCore == ProxyCore.MIHOMO && !canDelete && proxy.tag != "AUTO",
+                                fromSubscription = activeCore == ProxyCore.MIHOMO && !canDelete && proxy.address.isBlank(),
                                 onClick = if (selectionMode) {
                                     if (canDelete && !loading) toggleSelection else null
                                 } else if (activeCore == ProxyCore.MIHOMO && mihomoSelectable && !loading) {
@@ -312,8 +367,42 @@ fun ProxiesScreen(sshClient: SshClient?) {
         }
     }
 
+    if (showSubDialog && sshClient != null) {
+        val current = subStatus
+        val editing = current?.enabled == true
+        SubscriptionDialog(
+            initialUrl = current?.url.orEmpty(),
+            initialSettings = current?.settings ?: SubscriptionSettings(),
+            editing = editing,
+            onDismiss = { showSubDialog = false },
+            onSave = { url, settings ->
+                showSubDialog = false
+                actionMessage = if (editing) "Сохраняю настройки…" else "Подключаю подписку, проверяю конфиг…"
+                subscriptionAction { remote ->
+                    if (editing && url == current?.url) remote.updateSettings(settings)
+                    else remote.enable(url, settings)
+                }
+            }
+        )
+    }
+
+    if (confirmSubDisable && sshClient != null) {
+        AlertDialog(
+            onDismissRequest = { confirmSubDisable = false },
+            title = { Text("Отключить подписку?") },
+            text = { Text("Серверы подписки и ежедневное обновление будут удалены. Останутся только серверы, добавленные вручную.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmSubDisable = false
+                    subscriptionAction { it.disable() }
+                }) { Text("Отключить", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { confirmSubDisable = false }) { Text("Отмена") } }
+        )
+    }
+
     if (pendingDeletion.isNotEmpty()) {
-        val keepsServer = (deletableNames - pendingDeletion).isNotEmpty()
+        val keepsServer = (deletableNames - pendingDeletion).isNotEmpty() || subStatus?.enabled == true
         AlertDialog(
             onDismissRequest = { pendingDeletion = emptySet() },
             title = { Text(if (pendingDeletion.size == 1) "Удалить сервер?" else "Удалить ${pendingDeletion.size} серверов?") },

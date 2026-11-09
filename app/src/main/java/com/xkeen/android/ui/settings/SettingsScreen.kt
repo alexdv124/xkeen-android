@@ -169,7 +169,7 @@ fun SettingsScreen(
                         Spacer(Modifier.width(12.dp))
                         Column(Modifier.weight(1f)) {
                             Text("Создать бекап", fontWeight = FontWeight.Medium)
-                            Text("Сохранить все JSON-конфиги на роутере",
+                            Text("Сохранить конфиги Xray и Mihomo на роутере",
                                 style = MaterialTheme.typography.bodySmall)
                         }
                     }
@@ -237,14 +237,9 @@ fun SettingsScreen(
                 loading = true
                 scope.launch {
                     try {
-                        val cmds = RouterCommands(activeSshClient)
-                        val (ok, msg) = cmds.restoreBackup(timestamp)
-                        if (ok) {
-                            cmds.restartXkeen()
-                            message = "Восстановлено из $timestamp, xray перезапущен"
-                        } else {
-                            message = msg
-                        }
+                        // restoreBackup tests and applies the restored configs to the active core.
+                        val (_, msg) = RouterCommands(activeSshClient).restoreBackup(timestamp)
+                        message = msg
                     } catch (e: Exception) { message = e.message }
                     finally { loading = false }
                 }
@@ -269,34 +264,33 @@ fun SettingsScreen(
                 showCopyDialog = false
                 loading = true
                 scope.launch {
+                    val sshFrom = SshClient(from)
+                    val sshTo = SshClient(to)
                     try {
-                        val sshFrom = SshClient(from)
-                        val sshTo = SshClient(to)
                         val cmdsFrom = RouterCommands(sshFrom)
                         val cmdsTo = RouterCommands(sshTo)
 
-                        // Backup target first
-                        cmdsTo.backupConfigs()
-
-                        // Read all from source
+                        // Read the source first, so an unreachable source changes nothing.
                         val configs = cmdsFrom.readAllConfigs()
+                        require(configs.values.any { it.isNotBlank() }) { "На роутере ${from.alias} нет конфигов Xray" }
 
-                        // Write to target
+                        // Backup target, write, test; roll back on a failed test.
+                        val backup = cmdsTo.backupConfigs()
                         cmdsTo.writeAllConfigs(configs)
-
-                        // Test on target
                         val test = cmdsTo.testConfig()
-                        if (test.ok) {
+                        message = if (test.ok) {
                             cmdsTo.restartXkeen()
-                            message = "Конфиг скопирован: ${from.alias} → ${to.alias}"
+                            "Конфиг Xray скопирован: ${from.alias} → ${to.alias}"
                         } else {
-                            message = "Скопировано, но тест провален. Бекап сохранён"
+                            cmdsTo.restoreBackup(backup)
+                            "Конфиг не прошёл проверку на ${to.alias}, восстановлен бекап $backup"
                         }
-
+                    } catch (e: Exception) { message = "Ошибка: ${e.message}" }
+                    finally {
                         sshFrom.close()
                         sshTo.close()
-                    } catch (e: Exception) { message = "Ошибка: ${e.message}" }
-                    finally { loading = false }
+                        loading = false
+                    }
                 }
             },
             onDismiss = { showCopyDialog = false }

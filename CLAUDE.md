@@ -55,6 +55,38 @@ preserving native Mihomo proxies/groups/settings. Explicit generation from Xray 
 full replacement. Unit tests cover batch import, preservation, collisions, converter options,
 preflight failures, failed validation, uncertain writes, reload rollback and concurrent edits.
 
+### Subscription mode (Mihomo, v1.7.0)
+Router-side and phone-independent. `SubscriptionRemote.enable()` installs `app/src/main/resources/xk-sub.sh`
+(shipped as a Java resource, loaded with `getResourceAsStream`, so unit tests see it too) to
+`/opt/etc/xkeen-android/xk-sub.sh`, writes `subscription.conf` (TOP_N, CANDIDATES, DAILY_TIME,
+MIHOMO_CONFIG) and applies `MihomoConfigEditor.enableSubscription` through the usual staged
+validate/backup/reload transaction. The editor adds:
+- `proxy-providers.xk-sub` (type http, `./providers/xk-sub.yaml`, health-check) — Mihomo downloads and parses it;
+- `SUB-BEST` (url-test, `use: [xk-sub]`, `filter` written by the script), `SUB-ALL` (url-test over everything),
+  hidden `SUB-BENCH` (select) — all three named in `SubscriptionNames`;
+- loopback listener `xk-bench` (mixed, 127.0.0.1:17899) and rule `IN-NAME,xk-bench,SUB-BENCH`, which must stay
+  **first** — `replaceRules` preserves it, otherwise the benchmark measures whatever PROXY selects.
+- PROXY gets `SUB-BEST, SUB-ALL` prepended (created if missing).
+
+Cron (`/opt/var/spool/cron/crontabs/root`, crond restarted after edits):
+`M H * * * xk-sub.sh daily` (refresh provider via API + bench) and `*/30 * * * * xk-sub.sh check` (re-bench only when
+the provider file hash changed, fewer than 3 SUB-BEST members are alive, or the last bench is older than 7 days).
+
+Bench: provider health check → alive servers sorted by delay → top CANDIDATES (deduplicated by server:port when the
+cached provider is clash YAML or a base64 link list) → for each, select it in SUB-BENCH via API and measure download
+(Hetzner, ranged 20 MB, 6 s) and upload (Cloudflare `__up`, 8 MiB, 10 s) through the listener → score = down + 2·up,
+drop < 5 Mbit/s down → filter `^(?:name1|name2…)$` (regex-escaped) → yq edit of a staged copy → `mihomo -t` → reload.
+Results in `bench.json`, state in `state`, log in `subscription.log`; `xk-sub.sh status` prints JSON for the app.
+
+Router quirks this relies on / works around: BusyBox `sort -t<TAB> -kN -n` mis-orders (sort on a leading key column);
+Entware jq has no regex (`test()` unavailable — use grep); the app starts runs as `(sleep; exec script) & echo $! > lock/pid`
+so the lock shows "running" at once and the script accepts a lock holding its own PID.
+
+### XKeen / Mihomo updates (v1.7.0)
+`UpdatesRemote` reads installed versions (xkeen variable file, `mihomo -v`) and the latest release from the API URLs in
+xkeen's own variable file (jsDelivr fallback), then runs `xkeen -uk auto` / `xkeen -um auto` with stdin from /dev/null,
+after `backupCoreConfigs()`, and restarts the proxy if it ended up stopped. Requires xkeen with `get_auto_arg` (2.x).
+
 ### Single and batch server deletion
 `ProxiesScreen` has a shared selection mode and one confirmation for a complete batch, plus
 single-server delete buttons, in both cores. AUTO and provider-owned Mihomo nodes are excluded

@@ -2,6 +2,7 @@ package com.xkeen.android.data.ssh
 
 import com.jcraft.jsch.ChannelExec
 import com.jcraft.jsch.JSch
+import com.jcraft.jsch.JSchException
 import com.jcraft.jsch.Session
 import com.xkeen.android.domain.model.RouterProfile
 import kotlinx.coroutines.Dispatchers
@@ -13,7 +14,8 @@ import java.io.ByteArrayOutputStream
 import java.util.Base64
 
 class SshClient(private val profile: RouterProfile) : SshConnection {
-    private var session: Session? = null
+    @Volatile private var session: Session? = null
+    @Volatile private var closed = false
     private val mutex = Mutex()
     private val writeMutex = Mutex()
 
@@ -39,11 +41,23 @@ class SshClient(private val profile: RouterProfile) : SshConnection {
         session = newSession
     }
 
+    /** Opens an exec channel; a session the router silently dropped is replaced once. */
+    private fun openExecChannel(): ChannelExec {
+        connect()
+        return try {
+            (session ?: throw IllegalStateException("SSH not connected")).openChannel("exec") as ChannelExec
+        } catch (e: JSchException) {
+            runCatching { session?.disconnect() }
+            session = null
+            connect()
+            (session ?: throw IllegalStateException("SSH not connected")).openChannel("exec") as ChannelExec
+        }
+    }
+
     override suspend fun exec(cmd: String, timeout: Int): SshResult = mutex.withLock {
         withContext(Dispatchers.IO) {
-            connect()
-            val currentSession = session ?: throw IllegalStateException("SSH not connected")
-            val channel = currentSession.openChannel("exec") as ChannelExec
+            if (closed) throw IllegalStateException("SSH-соединение закрыто")
+            val channel = openExecChannel()
             channel.setCommand(cmd)
             channel.inputStream = null
 
@@ -83,8 +97,9 @@ class SshClient(private val profile: RouterProfile) : SshConnection {
         val tmpOut = "$path.tmp"
 
         try {
-            exec("printf '%s' '${chunks[0]}' > $tmpB64")
-            for (chunk in chunks.drop(1)) {
+            // An empty file is a valid write (chunks is empty then).
+            exec(": > $tmpB64")
+            for (chunk in chunks) {
                 exec("printf '%s' '$chunk' >> $tmpB64")
             }
             // Atomic write: decode to .tmp, only mv on success
@@ -98,7 +113,9 @@ class SshClient(private val profile: RouterProfile) : SshConnection {
         }
     }
 
+    /** Disconnects for good: later calls fail instead of silently reconnecting. */
     fun close() {
+        closed = true
         session?.disconnect()
         session = null
     }

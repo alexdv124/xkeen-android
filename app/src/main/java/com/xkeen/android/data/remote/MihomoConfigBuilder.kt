@@ -300,6 +300,9 @@ internal class MihomoConfigBuilder {
                     "IP-CIDR,192.168.0.0/16,$target,no-resolve",
                     "IP-CIDR,127.0.0.0/8,$target,no-resolve",
                     "IP-CIDR,169.254.0.0/16,$target,no-resolve",
+                    // LAN discovery (SSDP/WS-Discovery/mDNS) and broadcast never belong in a tunnel.
+                    "IP-CIDR,224.0.0.0/4,$target,no-resolve",
+                    "IP-CIDR,255.255.255.255/32,$target,no-resolve",
                     "IP-CIDR6,fc00::/7,$target,no-resolve"
                 )
             value.startsWith("ext:geoip_v2fly.dat:") ->

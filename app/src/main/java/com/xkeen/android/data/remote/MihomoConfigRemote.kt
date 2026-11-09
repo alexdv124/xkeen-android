@@ -39,6 +39,20 @@ class MihomoConfigRemote(private val ssh: SshConnection) {
             MihomoConfigEditor().removeProxies(raw, names)
         }
 
+    suspend fun enableSubscription(url: String): Pair<Boolean, String> =
+        updateConfig("Подписка подключена") { raw -> MihomoConfigEditor().enableSubscription(raw, url) }
+
+    suspend fun disableSubscription(): Pair<Boolean, String> =
+        updateConfig(
+            "Подписка отключена",
+            removedNames = SubscriptionNames.GROUPS
+        ) { raw -> MihomoConfigEditor().disableSubscription(raw) }
+
+    suspend fun subscriptionUrl(): String? = withContext(Dispatchers.IO) {
+        val path = RouterCommands(ssh).findMihomoConfigPath()
+        if (path.isBlank()) null else MihomoConfigEditor().subscriptionUrl(ssh.readFile(path))
+    }
+
     suspend fun applyRoutingFromXray(): Pair<Boolean, String> =
         updateConfig("Маршрутизация Mihomo применена") { raw ->
             val rules = MihomoConfigBuilder().buildRules(ssh.readFile(Paths.ROUTING))
@@ -82,7 +96,10 @@ class MihomoConfigRemote(private val ssh: SshConnection) {
                         checked("mv ${quote(staged)} ${quote(path)}")
                         check(api.reloadConfig(path)) { "Mihomo не применил новый конфиг" }
                         val newGroups = if (removedNames.isEmpty()) emptyMap() else api.getProxies()
-                        val restoredSelection = selections.map { selection ->
+                        val restoredSelection = selections.filter { selection ->
+                            // A selector removed by this change (e.g. SUB-BENCH) has nothing to restore.
+                            removedNames.isEmpty() || selection.name in newGroups
+                        }.map { selection ->
                             val next = if (selection.now in removedNames) {
                                 newGroups[selection.name]?.all?.firstOrNull { it !in removedNames }
                             } else selection.now

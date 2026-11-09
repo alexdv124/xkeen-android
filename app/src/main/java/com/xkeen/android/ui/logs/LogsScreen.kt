@@ -14,6 +14,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.xkeen.android.data.remote.RouterCommands
+import com.xkeen.android.data.remote.SubscriptionNames
+import com.xkeen.android.domain.model.ProxyCore
 import com.xkeen.android.data.ssh.SshClient
 import kotlinx.coroutines.launch
 
@@ -23,7 +25,10 @@ fun LogsScreen(sshClient: SshClient?) {
     var selectedTab by remember { mutableIntStateOf(0) }
     var logText by remember { mutableStateOf("") }
     var loading by remember { mutableStateOf(false) }
-    val tabs = listOf("Access", "Error")
+    var core by remember(sshClient) { mutableStateOf(ProxyCore.UNKNOWN) }
+    // Mihomo does not write the Xray logs, so show its live connections instead.
+    val tabs = if (core == ProxyCore.MIHOMO) listOf("Трафик", "Подписка", "Xray error")
+        else listOf("Access", "Error", "Подписка")
 
     fun refresh() {
         if (sshClient == null) return
@@ -31,14 +36,23 @@ fun LogsScreen(sshClient: SshClient?) {
         scope.launch {
             try {
                 val cmds = RouterCommands(sshClient)
-                logText = cmds.getLog(if (selectedTab == 0) "access" else "error", 300)
+                if (core == ProxyCore.UNKNOWN) {
+                    core = runCatching { cmds.getCoreState().activeCore }.getOrDefault(ProxyCore.UNKNOWN)
+                }
+                logText = when (tabs.getOrNull(selectedTab)) {
+                    "Трафик" -> cmds.getMihomoConnections()
+                    "Подписка" -> cmds.readTail(SubscriptionNames.DIR + "/subscription.log", 300)
+                        .ifBlank { "Подписка не подключена или ещё не обновлялась" }
+                    "Error", "Xray error" -> cmds.getLog("error", 300)
+                    else -> cmds.getLog("access", 300)
+                }
             } catch (e: Exception) {
                 logText = "Error: ${e.message}"
             } finally { loading = false }
         }
     }
 
-    LaunchedEffect(sshClient, selectedTab) { refresh() }
+    LaunchedEffect(sshClient, selectedTab, core) { refresh() }
 
     if (sshClient == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
