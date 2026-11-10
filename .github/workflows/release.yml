@@ -84,8 +84,10 @@ jobs:
             exit 1
           fi
           PREVIOUS_APK="${previous_apks[0]}"
-          previous_cert=$("$BUILD_TOOLS/apksigner" verify --print-certs "$PREVIOUS_APK" | awk '/Signer #1 certificate SHA-256 digest:/ {print $NF}')
-          current_cert=$("$BUILD_TOOLS/apksigner" verify --print-certs "$APK" | awk '/Signer #1 certificate SHA-256 digest:/ {print $NF}')
+          # SDK versions print either "Signer #1" or "V3.0 Signer" prefixes.
+          # Compare the unique certificate digests, independent of the label.
+          previous_cert=$("$BUILD_TOOLS/apksigner" verify --print-certs "$PREVIOUS_APK" | awk '/certificate SHA-256 digest:/ {print $NF}' | sort -u)
+          current_cert=$("$BUILD_TOOLS/apksigner" verify --print-certs "$APK" | awk '/certificate SHA-256 digest:/ {print $NF}' | sort -u)
           if [ -z "$previous_cert" ] || [ "$previous_cert" != "$current_cert" ]; then
             echo "::error::Signing certificate differs from $PREVIOUS_TAG; an in-place update would fail."
             exit 1
