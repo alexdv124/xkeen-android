@@ -35,6 +35,18 @@ MVVM + Clean Architecture. Kotlin, Jetpack Compose, Material Design 3.
 
 ## Critical implementation details
 
+### Config comments and core detection (v1.8.3)
+`XrayJson` reads local Xray JSON with //, /* */ and # comments outside strings, preserving
+string escapes and line positions. It is shared by configuration reads, server deletion,
+diagnostics and Xray-to-Mihomo conversion; API responses and VLESS payloads remain strict JSON.
+Malformed JSON and unclosed block comments still fail. Reads never rewrite remote files.
+`RouterCommands.getCoreState` gives a sole running process priority over status text, then
+uses the configured XKeen client if both/neither run, then an unambiguous core name in status.
+Non-numeric process output is not a PID. The server screen no longer treats UNKNOWN as XRAY.
+The third-party user reports Mihomo, while their screenshot labels the process Xray and lists
+Mihomo in updates. The exact source of that discrepancy is unconfirmed without router output;
+these changes are covered by local fixtures, not a claim of diagnosis on that router.
+
 ### Empty Xray JSON / optional observatory (v1.8.2)
 `SshClient.readFile` checks the command result through `checkedFileContents`; missing files,
 permission failures and incomplete commands raise typed `RemoteFileReadException`s rather than

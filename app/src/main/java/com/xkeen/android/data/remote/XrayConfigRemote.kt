@@ -28,7 +28,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
             throw IllegalStateException("Файл $path пуст. Проверьте конфигурацию Xray на роутере")
         }
         return try {
-            json.parseToJsonElement(raw).jsonObject
+            XrayJson.parseObject(raw)
         } catch (e: IllegalArgumentException) {
             throw IllegalStateException("Файл $path содержит некорректный JSON. Проверьте конфигурацию Xray на роутере", e)
         }

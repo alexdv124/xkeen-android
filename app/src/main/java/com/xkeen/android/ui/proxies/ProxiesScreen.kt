@@ -62,6 +62,7 @@ fun ProxiesScreen(sshClient: SshClient?) {
         try {
             val cmds = RouterCommands(sshClient)
             val core = cmds.getCoreState().activeCore
+            check(core != ProxyCore.UNKNOWN) { "Не удалось определить ядро XKeen. Проверьте его состояние и повторите загрузку" }
             activeCore = core
             if (core == ProxyCore.MIHOMO) {
                 configState = ConfigState.Empty

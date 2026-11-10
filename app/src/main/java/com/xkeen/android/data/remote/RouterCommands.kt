@@ -44,6 +44,7 @@ class RouterCommands(private val ssh: SshConnection) {
     private fun parseProcessInfo(out: String): ProcessInfo {
         val line = out.lineSequence().firstOrNull { it.isNotBlank() } ?: return ProcessInfo()
         val parts = line.trim().split(Regex("\\s+"))
+        if (parts.firstOrNull()?.toIntOrNull()?.let { it > 0 } != true) return ProcessInfo()
         val rssKb = parts.getOrNull(1)?.toLongOrNull()
         return ProcessInfo(
             running = true,
@@ -163,18 +164,25 @@ class RouterCommands(private val ssh: SshConnection) {
             "grep -m1 '^name_client=' /opt/etc/init.d/S99xkeen 2>/dev/null | cut -d'\"' -f2 || true"
         ).stdout.trim()
         val configuredCore = ProxyCore.fromCliName(configuredCoreText)
-        val activeCore = when {
-            statusText.contains("mihomo", ignoreCase = true) -> ProxyCore.MIHOMO
-            statusText.contains("xray", ignoreCase = true) -> ProxyCore.XRAY
-            configuredCore != ProxyCore.UNKNOWN -> configuredCore
-            else -> ProxyCore.UNKNOWN
-        }
 
         val xrayInstalled = ssh.exec("command -v xray 2>/dev/null || true").stdout.trim().isNotEmpty()
         val mihomoInstalled = ssh.exec("command -v mihomo 2>/dev/null || true").stdout.trim().isNotEmpty()
 
         val xrayInfo = getProcessInfo("xray")
         val mihomoInfo = getProcessInfo("mihomo")
+
+        // A sole running core is stronger evidence than names mentioned in status output.
+        // If both (or neither) run, prefer the configured XKeen client; ambiguous text is unknown.
+        val mentionsMihomo = Regex("(?i)\\bmihomo\\b").containsMatchIn(statusText)
+        val mentionsXray = Regex("(?i)\\bxray\\b").containsMatchIn(statusText)
+        val activeCore = when {
+            mihomoInfo.running && !xrayInfo.running -> ProxyCore.MIHOMO
+            xrayInfo.running && !mihomoInfo.running -> ProxyCore.XRAY
+            configuredCore != ProxyCore.UNKNOWN -> configuredCore
+            mentionsMihomo && !mentionsXray -> ProxyCore.MIHOMO
+            mentionsXray && !mentionsMihomo -> ProxyCore.XRAY
+            else -> ProxyCore.UNKNOWN
+        }
 
         val xrayVersion = if (xrayInstalled) {
             ssh.exec("xray version 2>&1 | head -1 || true").stdout.trim()
@@ -607,7 +615,7 @@ fi
         // 3. Proxy health — count from config, not logs
         val proxyTags = try {
             val raw = ssh.readFile(Paths.OUTBOUNDS)
-            val arr = kotlinx.serialization.json.Json.parseToJsonElement(raw).jsonObject["outbounds"]?.jsonArray
+            val arr = XrayJson.parseObject(raw)["outbounds"]?.jsonArray
             arr?.mapNotNull { it.jsonObject["tag"]?.jsonPrimitive?.content }
                 ?.filter { it.startsWith("proxy-") } ?: emptyList()
         } catch (_: Exception) { emptyList() }

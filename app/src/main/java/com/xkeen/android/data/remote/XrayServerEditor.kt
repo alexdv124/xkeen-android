@@ -7,7 +7,7 @@ internal class XrayServerEditor {
     private val json = Json { prettyPrint = true }
 
     fun remove(configs: Map<String, String>, tags: Set<String>): Map<String, String> {
-        val outConfig = Json.parseToJsonElement(configs.getValue(Paths.OUTBOUNDS)).jsonObject
+        val outConfig = XrayJson.parseObject(configs.getValue(Paths.OUTBOUNDS))
         val all = outConfig["outbounds"]?.jsonArray?.map { it.jsonObject }.orEmpty()
         fun tag(outbound: JsonObject) = outbound["tag"]?.jsonPrimitive?.content.orEmpty()
         val proxyTags = all.filter {
@@ -28,7 +28,7 @@ internal class XrayServerEditor {
         }
         fun selectors(value: JsonElement?): List<String> = value?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
             .filter { prefix -> remainingTags.any { it.startsWith(prefix) } }
-        val routeConfig = Json.parseToJsonElement(configs.getValue(Paths.ROUTING)).jsonObject
+        val routeConfig = XrayJson.parseObject(configs.getValue(Paths.ROUTING))
         val routing = routeConfig["routing"]?.jsonObject ?: error("Не найдена секция routing")
         val removedBalancers = mutableSetOf<String>()
         val balancers = routing["balancers"]?.jsonArray?.mapNotNull { element ->
@@ -64,7 +64,7 @@ internal class XrayServerEditor {
             put("routing", updatedRouting)
         }))
         configs[Paths.OBSERVATORY]?.let { raw ->
-            val config = Json.parseToJsonElement(raw).jsonObject.toMutableMap()
+            val config = XrayJson.parseObject(raw).toMutableMap()
             for (key in listOf("observatory", "burstObservatory")) {
                 val observer = config[key]?.jsonObject ?: continue
                 val selected = selectors(observer["subjectSelector"]).ifEmpty { (proxyTags - tags).toList() }

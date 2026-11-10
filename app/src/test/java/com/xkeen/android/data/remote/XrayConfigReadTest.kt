@@ -25,6 +25,16 @@ class XrayConfigReadTest {
         }
     }
 
+    @Test fun `server screen reads configs with comments without writing files`() = runBlocking {
+        val files = Files().apply {
+            contents.replaceAll { _, raw -> "// комментарий\n$raw\n/* конец */" }
+            contents[Paths.OBSERVATORY] = "# observatory\n{\"burstObservatory\":{\"subjectSelector\":[\"proxy-\"]}}"
+        }
+        val state = XrayConfigRemote(files).detectConfigState()
+        assertEquals(1, state.proxyCount)
+        assertTrue(state.hasObservatory)
+    }
+
     @Test fun `missing optional observatory does not break server list loading`() = runBlocking {
         val remote = XrayConfigRemote(Files())
         val state = remote.detectConfigState()

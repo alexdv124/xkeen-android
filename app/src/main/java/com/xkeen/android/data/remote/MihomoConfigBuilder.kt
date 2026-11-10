@@ -1,6 +1,5 @@
 package com.xkeen.android.data.remote
 
-import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -15,10 +14,8 @@ import kotlinx.serialization.json.jsonPrimitive
 
 internal class MihomoConfigBuilder {
 
-    private val json = Json { ignoreUnknownKeys = true }
-
     fun fromXray(outboundsRaw: String, routingRaw: String): String {
-        val proxies = json.parseToJsonElement(outboundsRaw).jsonObject["outbounds"]
+        val proxies = XrayJson.parseObject(outboundsRaw)["outbounds"]
             ?.jsonArray?.mapNotNull { convertOutbound(it.jsonObject) }.orEmpty()
         require(proxies.isNotEmpty()) { "В Xray-конфиге не найдено VLESS-серверов для Mihomo" }
         return buildConfig(proxies, routingRaw)
@@ -223,8 +220,7 @@ internal class MihomoConfigBuilder {
     fun buildRules(routingRaw: String): List<String> {
         val result = linkedSetOf<String>()
         val rules = runCatching {
-            json.parseToJsonElement(routingRaw)
-                .jsonObject["routing"]
+            XrayJson.parseObject(routingRaw)["routing"]
                 ?.jsonObject
                 ?.get("rules")
                 ?.jsonArray
