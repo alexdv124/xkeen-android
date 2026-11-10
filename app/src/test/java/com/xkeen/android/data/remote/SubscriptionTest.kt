@@ -39,9 +39,9 @@ class SubscriptionEditorTest {
         @Suppress("UNCHECKED_CAST")
         val rules = result["rules"] as List<String>
         assertEquals(SubscriptionNames.BENCH_RULE, rules.first())
-        assertEquals(SubscriptionNames.GEO_RULES, rules.drop(1).take(SubscriptionNames.GEO_RULES.size))
+        assertTrue(rules.indexOf("DOMAIN-SUFFIX,example.org,DIRECT") < rules.indexOf(SubscriptionNames.GEO_RULES.first()))
         assertTrue(rules.contains("DOMAIN-SUFFIX,elevenlabs.io,SUB-GEO"))
-        assertEquals(before["rules"], rules.drop(1 + SubscriptionNames.GEO_RULES.size))
+        assertEquals(before["rules"], rules.filterNot { SubscriptionNames.isManagedRule(it) })
         assertEquals(listOf(SubscriptionNames.PROVIDER), groups.getValue(SubscriptionNames.GEO)["use"])
         assertEquals("url-test", groups.getValue(SubscriptionNames.GEO)["type"])
     }
@@ -106,6 +106,27 @@ class SubscriptionEditorTest {
         assertEquals(listOf("PROXY", "AUTO", "Work"), editor.groups(enabled))
         val clash = MIHOMO_CONFIG.replace("name: Work", "name: SUB-ALL")
         assertTrue(runCatching { editor.enableSubscription(clash, SUB_URL) }.isFailure)
+    }
+
+    @Test fun `explicit direct routes beat geo defaults but geo beats broad country rules`() {
+        val enabled = editor.enableSubscription(MIHOMO_CONFIG, SUB_URL)
+        val direct = listOf("SRC-IP-CIDR,192.168.1.50/32,DIRECT", "DOMAIN-SUFFIX,openai.com,DIRECT")
+        val defaults = listOf("GEOSITE,category-ru,DIRECT", "GEOIP,RU,DIRECT,no-resolve", "MATCH,PROXY")
+        val rules = parseYaml(editor.replaceRules(enabled, defaults.dropLast(1) + direct + defaults.takeLast(1)))["rules"] as List<*>
+        val geo = rules.indexOf("DOMAIN-SUFFIX,openai.com,SUB-GEO")
+        assertEquals(SubscriptionNames.BENCH_RULE, rules.first())
+        direct.forEach { assertTrue(rules.indexOf(it) in 1 until geo) }
+        defaults.forEach { assertTrue(rules.indexOf(it) > geo) }
+    }
+
+    @Test fun `all direct disables geo overrides and changing back restores them`() {
+        val enabled = editor.enableSubscription(MIHOMO_CONFIG, SUB_URL)
+        val direct = editor.replaceRules(enabled, listOf("MATCH,DIRECT"))
+        assertEquals(listOf(SubscriptionNames.BENCH_RULE, "MATCH,DIRECT"), parseYaml(direct)["rules"])
+        val savedAgain = editor.enableSubscription(direct, SUB_URL)
+        assertEquals(parseYaml(direct)["rules"], parseYaml(savedAgain)["rules"])
+        val standard = editor.replaceRules(direct, listOf("GEOSITE,category-ru,DIRECT", "MATCH,PROXY"))
+        assertTrue((parseYaml(standard)["rules"] as List<*>).containsAll(SubscriptionNames.GEO_RULES))
     }
 
     @Test fun `config without PROXY gets one`() {

@@ -202,7 +202,11 @@ class SubscriptionRemote(private val ssh: SshConnection) {
     suspend fun disable(): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         val (ok, msg) = MihomoConfigRemote(ssh).disableSubscription()
         if (!ok) return@withContext false to msg
-        removeCron()
+        try {
+            removeCron()
+        } catch (e: Exception) {
+            return@withContext false to "Подписка отключена, но не удалось удалить расписание: ${e.message}"
+        }
         true to msg
     }
 
@@ -239,6 +243,9 @@ class SubscriptionRemote(private val ssh: SshConnection) {
         val script = requireNotNull(javaClass.getResourceAsStream("/xk-sub.sh")) { "Скрипт подписки не найден в приложении" }
             .bufferedReader().use { it.readText() }
         ssh.exec("mkdir -p ${SubscriptionNames.DIR}")
+        val lockScript = requireNotNull(javaClass.getResourceAsStream("/xk-config-lock.sh"))
+            .bufferedReader().use { it.readText() }
+        ssh.writeFileB64("${SubscriptionNames.DIR}/xk-config-lock.sh", lockScript)
         ssh.writeFileB64(SubscriptionNames.SCRIPT, script)
         ssh.writeFileB64(SubscriptionNames.CONF, buildConf(configPath, settings))
         val chmod = ssh.exec("chmod 755 ${SubscriptionNames.SCRIPT} && echo OK")
@@ -271,12 +278,17 @@ class SubscriptionRemote(private val ssh: SshConnection) {
         check("OK" in out.stdout) { "Не удалось настроить cron на роутере" }
     }
 
+    internal fun removeCronCommand(path: String = SubscriptionNames.CRONTAB): String =
+        "f=${shellQuote(path)}; if [ -f \"\$f\" ]; then " +
+            "awk 'index(\$0, \"xkeen-android/xk-sub.sh\") == 0' \"\$f\" > \"\$f.xk\" && " +
+            "mv \"\$f.xk\" \"\$f\" || exit 1; fi"
+
     private suspend fun removeCron() {
-        ssh.exec(
-            "f=${SubscriptionNames.CRONTAB}; [ -f \"\$f\" ] && grep -v 'xkeen-android/xk-sub.sh' \"\$f\" > \"\$f.xk\" && " +
-                "mv \"\$f.xk\" \"\$f\"; /opt/etc/init.d/S05crond restart >/dev/null 2>&1; true",
+        val result = ssh.exec(
+            removeCronCommand() + "; /opt/etc/init.d/S05crond restart >/dev/null 2>&1",
             timeout = 20000
         )
+        check(result.exitCode == 0) { "Не удалось удалить задачи cron или перезапустить crond" }
     }
 
     private fun shellQuote(value: String): String = "'" + value.replace("'", "'\\''") + "'"

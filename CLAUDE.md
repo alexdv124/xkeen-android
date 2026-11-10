@@ -35,6 +35,31 @@ MVVM + Clean Architecture. Kotlin, Jetpack Compose, Material Design 3.
 
 ## Critical implementation details
 
+### Config safety and routing fixes (v1.8.1)
+`MihomoConfigTransaction` performs the compare/install/reload/rollback in a single remote shell.
+It uses the same PID-owned `/tmp/xkeen-mihomo-config.lock` as `xk-sub.sh`, via the shared
+`xk-config-lock.sh` Java resource. The shell stays alive until the transaction finishes; the
+phone does not reserve a lock with a short-lived exec PID. Busy transactions fail without writes,
+and a SHA-256 comparison under the lock rejects stale app snapshots. Dead owners can be recovered.
+Imports, deletion, routing, subscription changes, full config generation and Mihomo backup restore
+all use this transaction. The benchmark selector is not restored by unrelated app operations.
+
+`SubscriptionRemote.installScript` installs both shell resources. After installing this app build,
+save subscription settings once to update the router-side scripts; an already running old script
+must finish before relying on the shared lock. No router migration happens merely by building the APK.
+
+Explicit direct source/domain/IP routes precede the GEO defaults, while broad country defaults
+follow them. ALL_DIRECT omits GEO rules, and switching back reconstructs them from the subscription
+groups. The benchmark listener rule stays first. `MIN_ALIVE` is capped at `TOP_N` so choosing one or
+two servers does not trigger perpetual re-benchmarking. Removing the last cron entries handles an
+empty result. Updates require a successful updater exit and positive version evidence; failed or
+missing version checks cannot prove that an installed version is current.
+
+Regression tests execute the actual shell transaction in temporary local directories with mocked
+network commands. Tests cover concurrent edits, stale snapshots, failed reloads/rollback/backups,
+first config creation, direct routing priority, small TOP_N, empty cron and failed updates.
+SSH host-key checking and Mihomo `no-resolve` behavior are deliberately unchanged.
+
 ### Direct Mihomo server import
 `ProxiesScreen` accepts one or several VLESS links while Mihomo is active. The user selects
 target groups (PROXY/AUTO by default). `MihomoConfigBuilder` shares the existing TCP/XHTTP
@@ -85,8 +110,9 @@ so the lock shows "running" at once and the script accepts a lock holding its ow
 ### Geo-blocked services (v1.8.0)
 `SUB-GEO` (url-test over the provider, `filter` written by `xk-sub.sh geo`) carries
 `SubscriptionNames.GEO_DOMAINS` (ElevenLabs, OpenAI/ChatGPT, Anthropic/Claude) via
-`DOMAIN-SUFFIX,…,SUB-GEO` rules placed right after the bench rule. `isManagedRule()` covers both, and
-`replaceRules`/`disableSubscription`/`carrySubscription` treat them as one block. The script checks servers through
+`DOMAIN-SUFFIX,…,SUB-GEO` rules placed after the bench rule and explicit direct overrides, before broad
+country defaults. ALL_DIRECT omits these GEO rules; other presets reconstruct them while keeping the
+benchmark rule first. `isManagedRule()` identifies both kinds for replacement/removal. The script checks servers through
 the bench listener without following redirects: elevenlabs.io must answer 200 (blocked exits 302 to
 geo-restriction.elevenlabs.io), api.openai.com and api.anthropic.com must answer 401 (blocked: 403). Mihomo's own
 health check cannot do this — it counts blocked exits as healthy. Candidates: last bench ranking first, then alive

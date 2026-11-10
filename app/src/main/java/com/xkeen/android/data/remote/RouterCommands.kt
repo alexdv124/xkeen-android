@@ -4,6 +4,8 @@ import com.xkeen.android.data.ssh.SshConnection
 import com.xkeen.android.domain.model.ConfigTestResult
 import com.xkeen.android.domain.model.CoreState
 import com.xkeen.android.domain.model.CoreSwitchResult
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -302,44 +304,7 @@ class RouterCommands(private val ssh: SshConnection) {
             return CoreSwitchResult(false, generated.second, backupId)
         }
 
-        val state = getCoreState(withConfigTests = false)
-        if (!state.mihomoInstalled) {
-            return CoreSwitchResult(
-                ok = true,
-                message = "Конфиг Mihomo собран; установите Mihomo, чтобы проверить",
-                backupId = backupId,
-                detail = generated.second
-            )
-        }
-
-        val test = testCoreConfig(ProxyCore.MIHOMO)
-        if (test.ok) {
-            var msg = "Конфиг Mihomo собран и проверен"
-            if (state.mihomoRunning) {
-                val path = findMihomoConfigPath()
-                val reloaded = path.isNotBlank() &&
-                    try { MihomoApi(ssh).reloadConfig(path) } catch (_: Exception) { false }
-                msg += if (reloaded) "; применён на лету" else "; перезапустите прокси, чтобы применить"
-            }
-            return CoreSwitchResult(true, msg, backupId, detail = test.output.takeLast(800))
-        }
-
-        restoreMihomoConfigFromBackup(backupId)
-        return CoreSwitchResult(
-            ok = false,
-            message = "Сгенерированный конфиг Mihomo не прошел проверку",
-            backupId = backupId,
-            rolledBack = true,
-            detail = test.output.takeLast(1200)
-        )
-    }
-
-    private suspend fun restoreMihomoConfigFromBackup(backupDir: String) {
-        ssh.exec(
-            "if [ -d \"$backupDir/mihomo\" ]; then " +
-                "mkdir -p ${Paths.MIHOMO_DIR}; cp -a \"$backupDir/mihomo/.\" ${Paths.MIHOMO_DIR}/; " +
-            "else rm -f ${Paths.MIHOMO_CONFIG}; fi"
-        )
+        return CoreSwitchResult(true, generated.second, backupId)
     }
 
     suspend fun switchCore(target: ProxyCore): CoreSwitchResult {
@@ -783,43 +748,40 @@ fi
         val core = getCoreState().activeCore
         val messages = mutableListOf<String>()
 
+        // The same staged, locked transaction as imports: failed validation cannot
+        // replace the file, and a failed reload rolls back before returning false.
+        if (hasMihomo) {
+            val raw = ssh.readFile("$backupDir/$MIHOMO_BACKUP_NAME")
+            val (ok, detail) = MihomoConfigRemote(ssh).restoreConfig(raw, apply = core == ProxyCore.MIHOMO)
+            if (!ok) return false to "Бекап $timestamp не восстановлен: $detail"
+            messages += detail
+        }
         if (hasJson) {
             val safety = backupConfigs()
-            ssh.exec("cp $backupDir/*.json ${Paths.CONFIGS_DIR}/")
-            val test = testConfig()
-            if (!test.ok && core != ProxyCore.MIHOMO) {
-                ssh.exec("cp ${Paths.CONFIGS_DIR}/backups/$safety/*.json ${Paths.CONFIGS_DIR}/")
-                return false to "Конфиг Xray из бекапа не прошёл проверку, изменения отменены: ${test.output.takeLast(200)}"
+            val (ok, detail) = withContext(NonCancellable) {
+                try {
+                    check(ssh.exec("cp $backupDir/*.json ${Paths.CONFIGS_DIR}/").exitCode == 0) {
+                        "Не удалось скопировать файлы Xray"
+                    }
+                    val test = testConfig()
+                    check(test.ok) { "Конфиг Xray из бекапа не прошёл проверку: ${test.output.takeLast(200)}" }
+                    if (core == ProxyCore.XRAY) {
+                        check(restartProxy().first) { "Xray не запустился после восстановления" }
+                    }
+                    true to "Xray восстановлен"
+                } catch (e: Exception) {
+                    val rolledBack = runCatching {
+                        check(ssh.exec("cp ${Paths.CONFIGS_DIR}/backups/$safety/*.json ${Paths.CONFIGS_DIR}/").exitCode == 0)
+                        if (core == ProxyCore.XRAY) check(restartProxy().first)
+                    }.isSuccess
+                    false to ("${e.message}. " + if (rolledBack) "Прежний конфиг Xray восстановлен" else
+                        "Откат Xray не подтверждён, резервная копия: $safety")
+                }
             }
-            messages += if (test.ok) "Xray восстановлен" else "Xray восстановлен, но проверка конфига не прошла"
+            messages += detail
+            if (!ok) return false to messages.joinToString(". ")
         }
-        if (hasMihomo) {
-            val path = findMihomoConfigPath().ifBlank { Paths.MIHOMO_CONFIG }
-            val dir = path.substringBeforeLast('/')
-            val test = ssh.exec(
-                "mihomo -t -d ${shellQuote(dir)} -f $backupDir/$MIHOMO_BACKUP_NAME 2>&1", timeout = 30000
-            )
-            if (test.exitCode != 0) {
-                messages += "конфиг Mihomo из бекапа не прошёл проверку и не восстановлен"
-            } else {
-                ssh.exec("cp -p ${shellQuote(path)} ${shellQuote("$path.before-restore")} 2>/dev/null; " +
-                    "cp $backupDir/$MIHOMO_BACKUP_NAME ${shellQuote(path)}")
-                messages += "Mihomo восстановлен"
-            }
-        }
-        val applied = when (core) {
-            ProxyCore.MIHOMO -> {
-                val path = findMihomoConfigPath()
-                runCatching { MihomoApi(ssh).reloadConfig(path) }.getOrDefault(false)
-            }
-            else -> {
-                ssh.exec("/opt/etc/init.d/S99xkeen restart 2>&1", timeout = 30000)
-                delay(4000)
-                getCoreState().activeRunning
-            }
-        }
-        messages += if (applied) "применено (${core.title})" else "перезапустите прокси, чтобы применить"
-        return true to "Бекап $timestamp: " + messages.joinToString(", ")
+        return true to "Бекап $timestamp: " + messages.joinToString(". ")
     }
 
     suspend fun readAllConfigs(): Map<String, String> {

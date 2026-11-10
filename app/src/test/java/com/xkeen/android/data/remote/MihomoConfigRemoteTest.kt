@@ -124,7 +124,7 @@ class MihomoConfigRemoteTest {
 
 }
 
-private class FakeRouter(initial: String = MIHOMO_CONFIG) : SshConnection {
+internal class FakeRouter(initial: String = MIHOMO_CONFIG) : SshConnection {
     val path = "/opt/etc/mihomo/config.yaml"
     val files = mutableMapOf(path to initial)
     val commands = mutableListOf<String>()
@@ -175,15 +175,42 @@ private class FakeRouter(initial: String = MIHOMO_CONFIG) : SshConnection {
                 if (changeDuringTest) files[path] = "# external change\n$MIHOMO_CONFIG"
                 out(if (validConfig) "test successful" else "invalid config", if (validConfig) 0 else 1)
             }
-            cmd.startsWith("cp -p") -> {
-                val (from, to) = paths()
-                if (failRollback && from.endsWith(".bak")) out(exit = 1)
-                else { files[to] = files.getValue(from); out() }
-            }
-            cmd.startsWith("mv ") -> {
-                val (from, to) = paths()
-                files[to] = files.remove(from)!!
-                out(exit = if (failMoveAfterWriting) -1 else 0)
+            cmd.startsWith("# XK_CONFIG_TRANSACTION") -> {
+                val sandbox = java.nio.file.Files.createTempDirectory("xkeen-transaction").toFile()
+                try {
+                    val root = java.io.File(sandbox, "config").apply { mkdirs() }
+                    val prefix = path.substringBeforeLast('/') + "/"
+                    files.filterKeys { it.startsWith(prefix) }.forEach { (name, contents) ->
+                        java.io.File(root, name.removePrefix(prefix)).writeText(contents)
+                    }
+                    val localPath = java.io.File(root, "config.yaml").absolutePath
+                    val command = cmd.replace(prefix, root.absolutePath + "/")
+                    val mock = """
+                        curl() {
+                            n=${'$'}(cat '${sandbox}/reloads' 2>/dev/null || echo 0)
+                            n=${'$'}((n + 1)); echo "${'$'}n" > '${sandbox}/reloads'
+                            command cp '$localPath' '${sandbox}/running'
+                            if [ '$failFirstReload' = true ] && [ "${'$'}n" = 1 ]; then echo 500; else echo 204; fi
+                        }
+                        cp() {
+                            source="${'$'}1"; [ "${'$'}source" = -p ] && source="${'$'}2"
+                            case "${'$'}source" in *.bak) [ '$failRollback' = true ] && return 1;; esac
+                            command cp "${'$'}@"
+                        }
+                        mv() {
+                            command mv "${'$'}@" || return 1
+                            case "${'$'}1" in *.tmp) [ '$failMoveAfterWriting' = true ] && return 1;; esac
+                            return 0
+                        }
+                    """.trimIndent()
+                    val result = runTestShell(mock + "\n" + command,
+                        mapOf("XK_CONFIG_LOCK" to java.io.File(sandbox, "lock").path))
+                    files.keys.filter { it.startsWith(prefix) }.toList().forEach { files.remove(it) }
+                    root.listFiles()!!.filter { it.isFile }.forEach { files[prefix + it.name] = it.readText() }
+                    java.io.File(sandbox, "reloads").takeIf { it.exists() }?.let { reloads += it.readText().trim().toInt() }
+                    java.io.File(sandbox, "running").takeIf { it.exists() }?.let { runningConfig = it.readText() }
+                    out(result.second, result.first)
+                } finally { sandbox.deleteRecursively() }
             }
             cmd.startsWith("rm -f") -> { files.remove(paths().single()); out() }
             else -> error("Unexpected router command: $cmd")

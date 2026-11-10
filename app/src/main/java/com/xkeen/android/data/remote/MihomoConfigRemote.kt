@@ -12,14 +12,16 @@ import java.util.UUID
 class MihomoConfigRemote(private val ssh: SshConnection) {
     suspend fun writeFromXrayConfig(): Pair<Boolean, String> {
         val generated = MihomoConfigBuilder().fromXray(ssh.readFile(Paths.OUTBOUNDS), ssh.readFile(Paths.ROUTING))
-        val existing = RouterCommands(ssh).findMihomoConfigPath().takeIf { it.isNotBlank() }
-            ?.let { runCatching { ssh.readFile(it) }.getOrNull() }.orEmpty()
-        val raw = if (existing.isNotBlank()) MihomoConfigEditor().carrySubscription(existing, generated) else generated
+        val state = RouterCommands(ssh).getCoreState()
         ssh.exec("mkdir -p ${Paths.MIHOMO_DIR} /opt/var/log/mihomo")
-        ssh.writeFileB64(Paths.MIHOMO_CONFIG, raw)
-        val kept = if (raw !== generated) " Подписка сохранена." else ""
-        return true to "Конфиг Mihomo создан: ${Paths.MIHOMO_CONFIG}.$kept"
+        return updateConfig("Конфиг Mihomo собран", apply = state.mihomoRunning,
+            validate = state.mihomoInstalled, allowMissing = true) { existing ->
+            if (existing.isBlank()) generated else MihomoConfigEditor().carrySubscription(existing, generated)
+        }
     }
+
+    suspend fun restoreConfig(raw: String, apply: Boolean): Pair<Boolean, String> =
+        updateConfig("Mihomo восстановлен", apply = apply, allowMissing = true) { raw }
 
     suspend fun getProxyGroups(): List<String> = withContext(Dispatchers.IO) {
         val path = RouterCommands(ssh).findMihomoConfigPath()
@@ -66,63 +68,65 @@ class MihomoConfigRemote(private val ssh: SshConnection) {
     private suspend fun updateConfig(
         successMessage: String,
         removedNames: Set<String> = emptySet(),
+        apply: Boolean = true,
+        validate: Boolean = true,
+        allowMissing: Boolean = false,
         transform: suspend (String) -> String
     ): Pair<Boolean, String> = updateMutex.withLock {
         withContext(Dispatchers.IO) {
             var stagedPath: String? = null
             try {
-                val path = RouterCommands(ssh).findMihomoConfigPath()
-                require(path.isNotBlank()) { "Конфиг Mihomo не найден" }
-                val original = ssh.readFile(path)
-                val updated = transform(original)
+                val foundPath = RouterCommands(ssh).findMihomoConfigPath()
+                require(allowMissing || foundPath.isNotBlank()) { "Конфиг Mihomo не найден" }
+                val path = foundPath.ifBlank { Paths.MIHOMO_CONFIG }
+                val original = if (foundPath.isBlank()) null else ssh.readFile(path)
+                val updated = transform(original.orEmpty())
                 val api = MihomoApi(ssh)
-                require(api.isAvailable()) { "На роутере нужен curl: opkg install curl" }
-                require(api.version().isNotBlank()) { "API Mihomo недоступен. Проверьте, что ядро запущено" }
-                val selections = api.getProxies().values.filter { it.type == "Selector" && it.now.isNotBlank() }
+                val controller = if (apply) {
+                    require(api.isAvailable()) { "На роутере нужен curl: opkg install curl" }
+                    require(api.version().isNotBlank()) { "API Mihomo недоступен. Проверьте, что ядро запущено" }
+                    api.resolveController()
+                } else null
+                // SUB-BENCH is owned by a running benchmark; never reset its current candidate.
+                val selections = if (apply) api.getProxies().values.filter {
+                    it.type == "Selector" && it.now.isNotBlank() && it.name != SubscriptionNames.BENCH
+                } else emptyList()
                 val id = UUID.randomUUID().toString()
                 val staged = "$path.android-$id.tmp"
                 val backup = "$path.android-$id.bak"
                 stagedPath = staged
                 ssh.writeFileB64(staged, updated)
-                val test = ssh.exec(
-                    "mihomo -t -d ${quote(path.substringBeforeLast('/'))} -f ${quote(staged)} 2>&1",
-                    timeout = 30000
-                )
-                if (test.exitCode != 0) {
-                    return@withContext false to "Конфиг Mihomo не прошёл проверку: ${(test.stdout + test.stderr).takeLast(800)}"
+                if (validate) {
+                    val test = ssh.exec(
+                        "mihomo -t -d ${quote(path.substringBeforeLast('/'))} -f ${quote(staged)} 2>&1",
+                        timeout = 30000
+                    )
+                    if (test.exitCode != 0) {
+                        return@withContext false to "Конфиг Mihomo не прошёл проверку: ${(test.stdout + test.stderr).takeLast(800)}"
+                    }
                 }
-                check(ssh.readFile(path) == original) { "Конфиг изменился во время операции. Повторите действие" }
-                checked("cp -p ${quote(path)} ${quote(backup)}")
-                // Once installation starts, complete either activation or rollback even if the
-                // screen is closed. A timed-out move/reload may already have taken effect.
                 withContext(NonCancellable) {
-                    try {
-                        checked("mv ${quote(staged)} ${quote(path)}")
-                        check(api.reloadConfig(path)) { "Mihomo не применил новый конфиг" }
+                    val (installed, detail) = MihomoConfigTransaction.install(ssh, path, original, staged, backup, controller)
+                    if (!installed) {
+                        if (detail.contains("Прежний конфиг восстановлен")) {
+                            selections.forEach { runCatching { api.select(it.name, it.now) } }
+                        }
+                        return@withContext false to detail
+                    }
+                    // Failure to restore a selector must not turn a completed installation into
+                    // an unsafe second rollback after the remote transaction released its lock.
+                    val restoredSelection = runCatching {
                         val newGroups = if (removedNames.isEmpty()) emptyMap() else api.getProxies()
-                        val restoredSelection = selections.filter { selection ->
-                            // A selector removed by this change (e.g. SUB-BENCH) has nothing to restore.
-                            removedNames.isEmpty() || selection.name in newGroups
-                        }.map { selection ->
+                        selections.filter { removedNames.isEmpty() || it.name in newGroups }.map { selection ->
                             val next = if (selection.now in removedNames) {
                                 newGroups[selection.name]?.all?.firstOrNull { it !in removedNames }
                             } else selection.now
-                            next != null && runCatching { api.select(selection.name, next) }.getOrDefault(false)
+                            next != null && api.select(selection.name, next)
                         }.all { it }
-                        true to ("$successMessage. Применено в Mihomo." +
-                            if (restoredSelection) "" else " Проверьте выбранный сервер: не удалось восстановить выбор.")
-                    } catch (e: Exception) {
-                        val restored = runCatching {
-                            checked("cp -p ${quote(backup)} ${quote(path)}")
-                            check(api.reloadConfig(path))
-                            selections.forEach { api.select(it.name, it.now) }
-                        }.isSuccess
-                        false to if (restored) {
-                            "Не удалось применить конфиг: ${e.message}. Прежний конфиг восстановлен."
-                        } else {
-                            "Не удалось применить конфиг и подтвердить откат. Резервная копия: $backup"
-                        }
-                    }
+                    }.getOrDefault(false)
+                    true to ("$successMessage. " +
+                        (if (apply) "Применено в Mihomo." else if (validate) "Конфиг проверен и сохранён." else "Сохранено без проверки: Mihomo не установлен.") +
+                        if (restoredSelection) "" else " Проверьте выбранный сервер: не удалось восстановить выбор.")
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -134,11 +138,6 @@ class MihomoConfigRemote(private val ssh: SshConnection) {
                 }
             }
         }
-    }
-
-    private suspend fun checked(command: String) {
-        val result = ssh.exec(command)
-        check(result.exitCode == 0) { "Ошибка записи конфига: ${result.stderr.takeLast(300)}" }
     }
 
     private fun quote(value: String): String = "'" + value.replace("'", "'\\''") + "'"

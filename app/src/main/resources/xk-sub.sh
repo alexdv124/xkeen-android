@@ -176,8 +176,10 @@ has_group() { yq -e "(.[\"proxy-groups\"][] | select(.name == \"$1\"))" "$CFG" >
 
 set_filter() { set_group_filter "$BEST_GROUP" "$1"; }
 
-set_group_filter() { # group, new filter regex ("" = all servers)
+set_group_filter() ( # subshell: config lock traps must not replace the benchmark's lock trap
     grp="$1"; want="$2"
+    . "$XK_DIR/xk-config-lock.sh" || exit 1
+    xk_config_lock || { log "config is busy, retry on the next check"; return 1; }
     if ! has_group "$grp"; then
         log "group $grp is not in the config (re-save the subscription settings in the app)"
         return 0
@@ -195,16 +197,27 @@ set_group_filter() { # group, new filter regex ("" = all servers)
     if ! mihomo -t -d "$CFG_DIR" -f "$staged" >/dev/null 2>&1; then
         rm -f "$staged"; die "new config failed mihomo -t"
     fi
-    cp -p "$CFG" "$CFG.xk-sub.bak"
-    mv "$staged" "$CFG" || die "cannot install config"
+    cp -p "$CFG" "$CFG.xk-sub.bak" || { rm -f "$staged"; die "cannot back up config"; }
+    restore_filter() {
+        cp -p "$CFG.xk-sub.bak" "$staged.rollback" && mv "$staged.rollback" "$CFG" || return 1
+        restored_code="$(api_code PUT '/configs?force=true' "$(jq -cn --arg p "$CFG" '{path:$p}')" 30)"
+        case "$restored_code" in 2??) return 0 ;; *) return 1 ;; esac
+    }
+    trap 'restore_filter; exit 1' HUP INT TERM
+    if ! mv "$staged" "$CFG"; then
+        restore_filter
+        die "cannot install config"
+    fi
     code="$(api_code PUT '/configs?force=true' "$(jq -cn --arg p "$CFG" '{path:$p}')" 30)"
     case "$code" in
-        2*) log "config reloaded with new $grp filter" ;;
-        *)  cp -p "$CFG.xk-sub.bak" "$CFG"
-            api_code PUT '/configs?force=true' "$(jq -cn --arg p "$CFG" '{path:$p}')" 30 >/dev/null
-            die "reload failed (HTTP $code), previous config restored" ;;
+        2*) trap 'exit 1' HUP INT TERM; log "config reloaded with new $grp filter" ;;
+        *)  if restore_filter; then
+                die "reload failed (HTTP $code), previous config restored"
+            else
+                die "reload failed (HTTP $code), rollback unconfirmed; backup: $CFG.xk-sub.bak"
+            fi ;;
     esac
-}
+)
 
 bench() {
     mihomo_up || die "mihomo API is not reachable on $CTRL"
@@ -271,8 +284,8 @@ bench() {
     chosen="$(head -n "$TOP_N" "$ranked" | cut -f1)"
     filter="$(printf '%s\n' "$chosen" | names_filter)"
 
+    set_filter "$filter" || die "cannot apply benchmark selection"
     write_result "$ranked" "$chosen"
-    set_filter "$filter"
     api_code PUT "/proxies/$BENCH_GROUP" "$(json_name "$(printf '%s\n' "$chosen" | head -n1)")" 10 >/dev/null
     state_set last_bench "$(date +%s)"
     state_set provider_hash "$(provider_hash)"
@@ -330,7 +343,7 @@ geo() {
         | split("\t") | { name: .[0], ok: (.[1] == "1"), reason: (.[2] // "") })) }' "$rows" > "$GEO_RESULT.tmp" \
         && mv "$GEO_RESULT.tmp" "$GEO_RESULT"
     if [ "$found" -gt 0 ]; then
-        set_group_filter "$GEO_GROUP" "$(awk -F '\t' '$2 == "1" { print $1 }' "$rows" | names_filter)"
+        set_group_filter "$GEO_GROUP" "$(awk -F '\t' '$2 == "1" { print $1 }' "$rows" | names_filter)" || die "cannot apply geo selection"
         state_set last_geo "$(date +%s)"
         log "geo: $found servers accepted by all services"
     else
@@ -399,7 +412,9 @@ cmd_check() {
     [ -n "$h" ] && [ "$h" != "$(state_get provider_hash)" ] && reason="subscription changed"
     if [ -z "$reason" ]; then
         a="$(best_alive)"
-        [ "${a:-0}" -lt "$MIN_ALIVE" ] && reason="only ${a:-0} chosen servers alive"
+        required="$MIN_ALIVE"
+        [ "$TOP_N" -lt "$required" ] && required="$TOP_N"
+        [ "${a:-0}" -lt "$required" ] && reason="only ${a:-0} chosen servers alive"
     fi
     if [ -z "$reason" ]; then
         last="$(state_get last_bench)"

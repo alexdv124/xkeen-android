@@ -131,8 +131,7 @@ internal class MihomoConfigEditor {
         config["proxy-groups"] = updated + listOf(best, all, geo, bench)
 
         val rules = (config["rules"] as? List<*>).orEmpty().filterNot { SubscriptionNames.isManagedRule(it) }
-        config["rules"] = listOf(SubscriptionNames.BENCH_RULE) + SubscriptionNames.GEO_RULES +
-            rules.ifEmpty { listOf("MATCH,PROXY") }
+        config["rules"] = subscriptionRules(rules.ifEmpty { listOf("MATCH,PROXY") })
         return yaml.dump(config)
     }
 
@@ -287,12 +286,33 @@ internal class MihomoConfigEditor {
         require(rules.none { it.endsWith(",PROXY") } || maps(config["proxy-groups"]).any { name(it) == "PROXY" }) {
             "Для пресетов маршрутизации нужна группа Mihomo с именем PROXY"
         }
-        // The subscription benchmark depends on its listener rule being first; routing presets
-        // must not drop it.
-        // Same for the geo-service rules routed to SUB-GEO.
-        val managed = (config["rules"] as? List<*>).orEmpty().filter { SubscriptionNames.isManagedRule(it) }
-        config["rules"] = managed + rules.filterNot { SubscriptionNames.isManagedRule(it) }
+        val subscribed = maps(config["proxy-groups"]).any {
+            name(it) == SubscriptionNames.GEO && isManagedGroup(it)
+        }
+        val clean = rules.filterNot { SubscriptionNames.isManagedRule(it) }
+        config["rules"] = if (subscribed) subscriptionRules(clean) else {
+            val bench = (config["rules"] as? List<*>).orEmpty().filter { it == SubscriptionNames.BENCH_RULE }
+            bench + clean
+        }
         return yaml.dump(config)
+    }
+
+    private fun subscriptionRules(rules: List<*>): List<Any?> {
+        val bench = listOf(SubscriptionNames.BENCH_RULE)
+        // Reconstruct GEO rules from the subscription on the next preset change; do not
+        // keep an active geo override while the user explicitly asks for all-direct.
+        if (rules.lastOrNull()?.toString()?.trim() == "MATCH,DIRECT") return bench + rules
+        val (direct, rest) = rules.partition { rule ->
+            val parts = rule.toString().split(',').map { it.trim() }
+            val target = parts.dropLastWhile { it in setOf("no-resolve", "src", "dst") }.lastOrNull()
+            target == "DIRECT" && parts.firstOrNull() in setOf(
+                "SRC-IP-CIDR", "SRC-IP-CIDR6", "IP-CIDR", "IP-CIDR6",
+                "DOMAIN", "DOMAIN-SUFFIX", "DOMAIN-KEYWORD", "DOMAIN-REGEX"
+            ) && !(parts.firstOrNull() == "DOMAIN-SUFFIX" && parts.getOrNull(1) in setOf("ru", "su", "рф"))
+        }
+        // Explicit direct routes beat geo-service defaults; broad RU GEOIP/GEOSITE
+        // defaults still follow GEO, otherwise the geo-block workaround is ineffective.
+        return bench + direct + SubscriptionNames.GEO_RULES + rest
     }
 
     private fun document(raw: String): MutableMap<String, Any?> = map(yaml.load<Any>(raw)).toMutableMap()

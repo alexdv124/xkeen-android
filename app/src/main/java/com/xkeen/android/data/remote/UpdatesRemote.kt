@@ -75,7 +75,8 @@ class UpdatesRemote(private val ssh: SshConnection) {
             val backup = cmds.backupCoreConfigs()
             val coreBefore = runCatching { cmds.getCoreState().activeCore }.getOrDefault(ProxyCore.UNKNOWN)
             // stdin from /dev/null: an unexpected prompt fails fast instead of hanging the router.
-            val output = cleanOutput(ssh.exec("xkeen $flag auto </dev/null 2>&1", timeout = 600000).stdout)
+            val execution = ssh.exec("xkeen $flag auto </dev/null 2>&1", timeout = 600000)
+            val output = cleanOutput(execution.stdout + execution.stderr)
             delay(2000)
             val after = check()
             val installed = pick(after).installed
@@ -88,10 +89,15 @@ class UpdatesRemote(private val ssh: SshConnection) {
                     " Внимание: прокси не запустился, проверьте вкладку «Главная»."
             }
             val upgraded = VersionCompare.compare(installed, pick(before).installed) > 0
-            val ok = upgraded || !pick(after).updateAvailable
+            val latest = pick(after).latest
+            val confirmedCurrent = installed.isNotBlank() && latest.isNotBlank() &&
+                VersionCompare.compare(installed, latest) >= 0
+            val ok = execution.exitCode == 0 && (upgraded || confirmedCurrent)
             val message = when {
+                execution.exitCode != 0 -> "$title: обновление завершилось ошибкой или его результат не подтверждён (код ${execution.exitCode}).$note"
                 upgraded -> "$title обновлён: ${pick(before).installed} → $installed.$note"
                 ok -> "$title уже последней версии ($installed).$note"
+                latest.isBlank() || installed.isBlank() -> "$title: не удалось подтвердить результат обновления — версия недоступна.$note"
                 else -> "$title не обновился (сейчас $installed, доступна ${pick(after).latest}).$note"
             }
             ok to "$message\nBackup: $backup\n\n${output.takeLast(700)}".trim()

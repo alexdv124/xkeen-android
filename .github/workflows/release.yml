@@ -67,6 +67,47 @@ jobs:
           mv app/build/outputs/apk/release/app-release.apk "app/build/outputs/apk/release/xkeen-android-${VERSION}.apk"
           echo "apk_path=app/build/outputs/apk/release/xkeen-android-${VERSION}.apk" >> "$GITHUB_OUTPUT"
 
+      - name: Verify upgrade compatibility with previous release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APK: ${{ steps.rename.outputs.apk_path }}
+        run: |
+          set -euo pipefail
+          BUILD_TOOLS=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          PREVIOUS_TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName --jq .tagName)
+          PREVIOUS_DIR="$RUNNER_TEMP/previous-release"
+          mkdir -p "$PREVIOUS_DIR"
+          gh release download "$PREVIOUS_TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.apk' --dir "$PREVIOUS_DIR"
+          previous_apks=("$PREVIOUS_DIR"/*.apk)
+          if [ "${#previous_apks[@]}" -ne 1 ] || [ ! -f "${previous_apks[0]}" ]; then
+            echo "::error::Expected exactly one previous APK for compatibility verification."
+            exit 1
+          fi
+          PREVIOUS_APK="${previous_apks[0]}"
+          previous_cert=$("$BUILD_TOOLS/apksigner" verify --print-certs "$PREVIOUS_APK" | awk '/Signer #1 certificate SHA-256 digest:/ {print $NF}')
+          current_cert=$("$BUILD_TOOLS/apksigner" verify --print-certs "$APK" | awk '/Signer #1 certificate SHA-256 digest:/ {print $NF}')
+          if [ -z "$previous_cert" ] || [ "$previous_cert" != "$current_cert" ]; then
+            echo "::error::Signing certificate differs from $PREVIOUS_TAG; an in-place update would fail."
+            exit 1
+          fi
+          previous_meta=$("$BUILD_TOOLS/aapt" dump badging "$PREVIOUS_APK" | sed -n '1p')
+          current_meta=$("$BUILD_TOOLS/aapt" dump badging "$APK" | sed -n '1p')
+          previous_package=$(echo "$previous_meta" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
+          current_package=$(echo "$current_meta" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
+          previous_code=$(echo "$previous_meta" | sed -n "s/.* versionCode='\([0-9]*\)'.*/\1/p")
+          current_code=$(echo "$current_meta" | sed -n "s/.* versionCode='\([0-9]*\)'.*/\1/p")
+          current_version=$(echo "$current_meta" | sed -n "s/.* versionName='\([^']*\)'.*/\1/p")
+          if [ -z "$current_package" ] || [ "$previous_package" != "$current_package" ] ||
+             [ -z "$previous_code" ] || [ -z "$current_code" ] || [ "$current_code" -le "$previous_code" ]; then
+            echo "::error::Package identity or versionCode does not allow an update from $PREVIOUS_TAG."
+            exit 1
+          fi
+          if [[ "$GITHUB_REF" == refs/tags/* ]] && [ "$current_version" != "${GITHUB_REF_NAME#v}" ]; then
+            echo "::error::APK versionName does not match the release tag."
+            exit 1
+          fi
+          echo "Verified update from $PREVIOUS_TAG: $current_package, versionCode $previous_code -> $current_code, same signing certificate."
+
       - name: Upload APK as artifact
         uses: actions/upload-artifact@v4
         with:
