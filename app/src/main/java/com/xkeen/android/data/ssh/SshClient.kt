@@ -86,7 +86,7 @@ class SshClient(private val profile: RouterProfile) : SshConnection {
     }
 
     override suspend fun readFile(path: String): String {
-        return exec("cat ${shellQuote(path)}").stdout
+        return checkedFileContents(path, exec("cat ${shellQuote(path)}"))
     }
 
     override suspend fun writeFileB64(path: String, content: String): Unit = writeMutex.withLock {

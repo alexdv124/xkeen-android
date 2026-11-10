@@ -184,7 +184,7 @@ fun ProxiesScreen(sshClient: SshClient?) {
 
     Scaffold(
         floatingActionButton = {
-            if (sshClient != null && !loading && !selectionMode && activeCore != ProxyCore.UNKNOWN) {
+            if (sshClient != null && !loading && error == null && !selectionMode && activeCore != ProxyCore.UNKNOWN) {
                 FloatingActionButton(onClick = {
                     if (activeCore == ProxyCore.MIHOMO) {
                         loading = true
@@ -224,7 +224,12 @@ fun ProxiesScreen(sshClient: SshClient?) {
                         if (error != null) {
                             item {
                                 Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
-                                    Text(error!!, Modifier.padding(16.dp))
+                                    Column(Modifier.padding(16.dp)) {
+                                        Text(error!!)
+                                        TextButton(onClick = { scope.launch { refresh() } }, enabled = !loading) {
+                                            Text("Повторить загрузку")
+                                        }
+                                    }
                                 }
                             }
                         }

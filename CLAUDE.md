@@ -35,6 +35,17 @@ MVVM + Clean Architecture. Kotlin, Jetpack Compose, Material Design 3.
 
 ## Critical implementation details
 
+### Empty Xray JSON / optional observatory (v1.8.2)
+`SshClient.readFile` checks the command result through `checkedFileContents`; missing files,
+permission failures and incomplete commands raise typed `RemoteFileReadException`s rather than
+passing an empty/partial stdout to a JSON parser. `XrayConfigRemote.readConfig` reports the path
+for empty/invalid required JSON without displaying raw config contents. Only the optional
+`07_observatory.json` accepts an empty file or a typed MISSING failure. Permission errors and
+timeouts remain errors, and loading the server list never creates or rewrites router files.
+`ProxiesScreen` offers a retry and hides the add action while loading has failed.
+The empty observatory fixture reproduced the reported 1.8.0 screenshot before the fix; the
+specific third-party router's file state was not inspected. SSH host-key policy is unchanged.
+
 ### Config safety and routing fixes (v1.8.1)
 `MihomoConfigTransaction` performs the compare/install/reload/rollback in a single remote shell.
 It uses the same PID-owned `/tmp/xkeen-mihomo-config.lock` as `xk-sub.sh`, via the shared

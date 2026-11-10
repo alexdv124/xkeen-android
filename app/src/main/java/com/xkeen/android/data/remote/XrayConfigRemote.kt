@@ -1,6 +1,8 @@
 package com.xkeen.android.data.remote
 
 import com.xkeen.android.data.ssh.SshConnection
+import com.xkeen.android.data.ssh.RemoteFileReadException
+import com.xkeen.android.data.ssh.RemoteFileReadFailure
 import com.xkeen.android.domain.model.ConfigState
 import com.xkeen.android.domain.model.CustomRoute
 import com.xkeen.android.domain.model.ProxyInfo
@@ -14,9 +16,26 @@ class XrayConfigRemote(private val ssh: SshConnection) {
 
     private val json = Json { ignoreUnknownKeys = true; prettyPrint = true }
 
+    private suspend fun readConfig(path: String, optional: Boolean = false): JsonObject {
+        val raw = try {
+            ssh.readFile(path)
+        } catch (e: RemoteFileReadException) {
+            if (optional && e.reason == RemoteFileReadFailure.MISSING) return JsonObject(emptyMap())
+            throw e
+        }
+        if (raw.isBlank()) {
+            if (optional) return JsonObject(emptyMap())
+            throw IllegalStateException("Файл $path пуст. Проверьте конфигурацию Xray на роутере")
+        }
+        return try {
+            json.parseToJsonElement(raw).jsonObject
+        } catch (e: IllegalArgumentException) {
+            throw IllegalStateException("Файл $path содержит некорректный JSON. Проверьте конфигурацию Xray на роутере", e)
+        }
+    }
+
     suspend fun getProxyList(): List<ProxyInfo> {
-        val raw = ssh.readFile(Paths.OUTBOUNDS)
-        val config = Json.parseToJsonElement(raw).jsonObject
+        val config = readConfig(Paths.OUTBOUNDS)
         val outbounds = config["outbounds"]?.jsonArray ?: return emptyList()
 
         return outbounds.mapNotNull { ob ->
@@ -47,8 +66,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
     }
 
     suspend fun addOutbound(outbound: JsonObject, fragmentSettings: JsonObject? = null): Pair<Boolean, String> {
-        val raw = ssh.readFile(Paths.OUTBOUNDS)
-        val config = Json.parseToJsonElement(raw).jsonObject.toMutableMap()
+        val config = readConfig(Paths.OUTBOUNDS).toMutableMap()
         val outbounds = config["outbounds"]?.jsonArray?.toMutableList()
             ?: return Pair(false, "No outbounds array")
 
@@ -92,8 +110,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
     suspend fun removeOutbound(tag: String): Pair<Boolean, String> {
         if (!tag.startsWith("proxy-")) return Pair(false, "Can only remove proxy outbounds")
 
-        val raw = ssh.readFile(Paths.OUTBOUNDS)
-        val config = Json.parseToJsonElement(raw).jsonObject.toMutableMap()
+        val config = readConfig(Paths.OUTBOUNDS).toMutableMap()
         val outbounds = config["outbounds"]?.jsonArray?.toMutableList()
             ?: return Pair(false, "No outbounds")
 
@@ -110,8 +127,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
     }
 
     suspend fun getRoutingMode(): RoutingMode {
-        val raw = ssh.readFile(Paths.ROUTING)
-        val config = Json.parseToJsonElement(raw).jsonObject
+        val config = readConfig(Paths.ROUTING)
         val rules = config["routing"]?.jsonObject?.get("rules")?.jsonArray
             ?: return RoutingMode.Auto
 
@@ -127,8 +143,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
     }
 
     suspend fun setRoutingMode(mode: RoutingMode): Pair<Boolean, String> {
-        val raw = ssh.readFile(Paths.ROUTING)
-        val config = Json.parseToJsonElement(raw).jsonObject.toMutableMap()
+        val config = readConfig(Paths.ROUTING).toMutableMap()
         val routing = config["routing"]?.jsonObject?.toMutableMap()
             ?: return Pair(false, "No routing")
         val rules = routing["rules"]?.jsonArray?.toMutableList()
@@ -162,8 +177,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
     }
 
     suspend fun getBalancerTags(): List<String> {
-        val raw = ssh.readFile(Paths.ROUTING)
-        val config = Json.parseToJsonElement(raw).jsonObject
+        val config = readConfig(Paths.ROUTING)
         val balancers = config["routing"]?.jsonObject?.get("balancers")?.jsonArray
             ?: return emptyList()
 
@@ -185,16 +199,14 @@ class XrayConfigRemote(private val ssh: SshConnection) {
         val proxies = getProxyList()
         if (proxies.isEmpty()) return ConfigState.Empty
 
-        val raw = ssh.readFile(Paths.ROUTING)
-        val config = Json.parseToJsonElement(raw).jsonObject
+        val config = readConfig(Paths.ROUTING)
         val balancers = config["routing"]?.jsonObject?.get("balancers")?.jsonArray
         val hasBalancer = balancers?.any {
             it.jsonObject["tag"]?.jsonPrimitive?.content == "proxy-balancer"
         } ?: false
 
         // Check observatory
-        val obsRaw = try { ssh.readFile(Paths.OBSERVATORY) } catch (_: Exception) { "{}" }
-        val obsConfig = Json.parseToJsonElement(obsRaw).jsonObject
+        val obsConfig = readConfig(Paths.OBSERVATORY, optional = true)
         val hasObservatory = obsConfig.containsKey("burstObservatory")
 
         return ConfigState(
@@ -233,8 +245,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
         ssh.writeFileB64(Paths.OBSERVATORY, obsContent)
 
         // 2. Add balancer to routing config
-        val raw = ssh.readFile(Paths.ROUTING)
-        val config = Json.parseToJsonElement(raw).jsonObject.toMutableMap()
+        val config = readConfig(Paths.ROUTING).toMutableMap()
         val routing = config["routing"]?.jsonObject?.toMutableMap()
             ?: return Pair(false, "No routing section")
 
@@ -301,8 +312,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
     suspend fun setBalancerTags(tags: List<String>): Pair<Boolean, String> {
         if (tags.isEmpty()) return Pair(false, "At least one proxy must be enabled")
 
-        val raw = ssh.readFile(Paths.ROUTING)
-        val config = Json.parseToJsonElement(raw).jsonObject.toMutableMap()
+        val config = readConfig(Paths.ROUTING).toMutableMap()
         val routing = config["routing"]?.jsonObject?.toMutableMap()
             ?: return Pair(false, "No routing")
         val balancers = routing["balancers"]?.jsonArray?.toMutableList()
@@ -417,8 +427,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
      * Detect current routing preset from rules structure.
      */
     suspend fun getRoutingConfig(): RoutingConfig {
-        val raw = ssh.readFile(Paths.ROUTING)
-        val config = Json.parseToJsonElement(raw).jsonObject
+        val config = readConfig(Paths.ROUTING)
         val routing = config["routing"]?.jsonObject ?: return RoutingConfig()
         val rules = routing["rules"]?.jsonArray ?: return RoutingConfig()
 
@@ -804,8 +813,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
         aqaraEnabled: Boolean = false,
         zonaDirect: Boolean = false
     ): Pair<Boolean, String> {
-        val raw = ssh.readFile(Paths.ROUTING)
-        val config = Json.parseToJsonElement(raw).jsonObject.toMutableMap()
+        val config = readConfig(Paths.ROUTING).toMutableMap()
         val routing = config["routing"]?.jsonObject?.toMutableMap()
             ?: return Pair(false, "No routing section")
 
