@@ -32,8 +32,8 @@ android {
         applicationId = "com.xkeen.android"
         minSdk = 26
         targetSdk = 35
-        versionCode = 20
-        versionName = "1.8.3"
+        versionCode = 21
+        versionName = "1.9.0"
     }
 
     signingConfigs {
@@ -138,3 +138,10 @@ dependencies {
     // Test
     testImplementation("junit:junit:4.13.2")
 }
+
+// Execute the same Python job that will run on the router; CI must cover cron and rollback too.
+val testXraySubscription by tasks.registering(Exec::class) {
+    workingDir(projectDir)
+    commandLine("python3", "-m", "unittest", "discover", "-s", "src/test/python", "-v")
+}
+tasks.matching { it.name == "testDebugUnitTest" }.configureEach { dependsOn(testXraySubscription) }

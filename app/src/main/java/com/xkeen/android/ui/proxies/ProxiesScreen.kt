@@ -23,6 +23,7 @@ import com.xkeen.android.data.remote.SubscriptionSettings
 import com.xkeen.android.data.remote.SubscriptionStatus
 import com.xkeen.android.data.remote.VlessParser
 import com.xkeen.android.data.remote.XrayServerRemote
+import com.xkeen.android.data.remote.XraySubscriptionRemote
 import com.xkeen.android.data.remote.XrayConfigRemote
 import com.xkeen.android.data.ssh.SshClient
 import com.xkeen.android.domain.model.ConfigState
@@ -104,7 +105,8 @@ fun ProxiesScreen(sshClient: SshClient?) {
                 val config = XrayConfigRemote(sshClient)
                 configState = config.detectConfigState()
                 val list = config.getProxyList()
-                deletableNames = list.map { it.tag }.toSet()
+                deletableNames = list.map { it.tag }.filterNot { it.startsWith(XraySubscriptionRemote.PREFIX) }.toSet()
+                subStatus = SubscriptionRemote(sshClient, core).status()
                 val obs = try { cmds.getObservatoryState() } catch (_: Exception) {
                     com.xkeen.android.domain.model.ObservatoryState()
                 }
@@ -149,7 +151,7 @@ fun ProxiesScreen(sshClient: SshClient?) {
         loading = true
         scope.launch {
             try {
-                val (_, msg) = action(SubscriptionRemote(client))
+                val (_, msg) = action(SubscriptionRemote(client, activeCore))
                 actionMessage = msg
                 refresh()
             } catch (e: Exception) { actionMessage = e.message }
@@ -163,7 +165,7 @@ fun ProxiesScreen(sshClient: SshClient?) {
         if (subStatus?.running != true) return@LaunchedEffect
         while (true) {
             kotlinx.coroutines.delay(5000)
-            val next = try { SubscriptionRemote(client).status() } catch (_: Exception) { null } ?: continue
+            val next = try { SubscriptionRemote(client, activeCore).status() } catch (_: Exception) { null } ?: continue
             if (!next.running) { refresh(); break }
             subStatus = next
         }
@@ -241,9 +243,10 @@ fun ProxiesScreen(sshClient: SshClient?) {
                                 }
                             }
                         }
-                        if (activeCore == ProxyCore.MIHOMO) {
+                        if (activeCore != ProxyCore.UNKNOWN) {
                             item {
                                 SubscriptionCard(
+                                    xray = activeCore == ProxyCore.XRAY,
                                     status = subStatus,
                                     busy = loading,
                                     onConnect = { showSubDialog = true },
@@ -254,6 +257,8 @@ fun ProxiesScreen(sshClient: SshClient?) {
                                     onDisable = { confirmSubDisable = true }
                                 )
                             }
+                        }
+                        if (activeCore == ProxyCore.MIHOMO) {
                             item {
                                 Card(
                                     modifier = Modifier.fillMaxWidth(),
@@ -350,7 +355,7 @@ fun ProxiesScreen(sshClient: SshClient?) {
                                 showDelete = canDelete && !loading && !selectionMode,
                                 checked = if (selectionMode && canDelete) proxy.tag in selectedNames else null,
                                 onCheckedChange = if (!loading) toggleSelection else null,
-                                fromSubscription = activeCore == ProxyCore.MIHOMO && !canDelete && proxy.address.isBlank(),
+                                fromSubscription = (activeCore == ProxyCore.MIHOMO && !canDelete && proxy.address.isBlank()) || proxy.tag.startsWith(XraySubscriptionRemote.PREFIX),
                                 onClick = if (selectionMode) {
                                     if (canDelete && !loading) toggleSelection else null
                                 } else if (activeCore == ProxyCore.MIHOMO && mihomoSelectable && !loading) {
@@ -379,6 +384,7 @@ fun ProxiesScreen(sshClient: SshClient?) {
         val current = subStatus
         val editing = current?.enabled == true
         SubscriptionDialog(
+            xray = activeCore == ProxyCore.XRAY,
             initialUrl = current?.url.orEmpty(),
             initialSettings = current?.settings ?: SubscriptionSettings(),
             editing = editing,
@@ -398,7 +404,7 @@ fun ProxiesScreen(sshClient: SshClient?) {
         AlertDialog(
             onDismissRequest = { confirmSubDisable = false },
             title = { Text("Отключить подписку?") },
-            text = { Text("Серверы подписки и ежедневное обновление будут удалены. Останутся только серверы, добавленные вручную.") },
+            text = { Text(if (activeCore == ProxyCore.XRAY) "Автообновление и проверки по расписанию будут отключены. Последние рабочие серверы и маршруты останутся на роутере." else "Серверы подписки и ежедневное обновление будут удалены. Останутся только серверы, добавленные вручную.") },
             confirmButton = {
                 TextButton(onClick = {
                     confirmSubDisable = false
@@ -591,7 +597,7 @@ fun ProxyCard(
                     tint = if (proxy.failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
                 )
                 Spacer(Modifier.width(8.dp))
-                Text(proxy.tag, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                Text(proxy.displayName.ifBlank { proxy.tag }, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                 if (proxy.delayMs > 0) {
                     Text("${proxy.delayMs} ms", style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)

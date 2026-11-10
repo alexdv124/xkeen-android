@@ -28,6 +28,16 @@ jobs:
         with:
           gradle-version: '8.11.1'
 
+      - name: Prepare real Xray transport tests
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/xray-tests"
+          gh release download v26.11.9 --repo XTLS/Xray-core --pattern 'Xray-linux-64.zip' --dir "$RUNNER_TEMP/xray-tests"
+          unzip -q "$RUNNER_TEMP/xray-tests/Xray-linux-64.zip" -d "$RUNNER_TEMP/xray-tests"
+          chmod +x "$RUNNER_TEMP/xray-tests/xray"
+          echo "XRAY_TEST_BINARY=$RUNNER_TEMP/xray-tests/xray" >> "$GITHUB_ENV"
+
       - name: Decode release keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}

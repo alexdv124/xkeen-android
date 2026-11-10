@@ -27,6 +27,7 @@ fun RoutingScreen(sshClient: SshClient?) {
     var message by remember { mutableStateOf<String?>(null) }
     var showCustomRouteDialog by remember { mutableStateOf(false) }
     var deviceToRoute by remember { mutableStateOf<com.xkeen.android.data.remote.NetworkDevice?>(null) }
+    var xraySubscription by remember { mutableStateOf(false) }
     var activeCore by remember { mutableStateOf(ProxyCore.XRAY) }
 
     fun refresh() {
@@ -36,6 +37,7 @@ fun RoutingScreen(sshClient: SshClient?) {
             try {
                 val config = XrayConfigRemote(sshClient)
                 activeCore = try { RouterCommands(sshClient).getCoreState().activeCore } catch (_: Exception) { ProxyCore.XRAY }
+                xraySubscription = activeCore == ProxyCore.XRAY && config.hasSubscriptionConfig()
                 routingConfig = config.getRoutingConfig()
                 proxies = config.getProxyList()
             } catch (e: Exception) { message = e.message }
@@ -302,7 +304,10 @@ fun RoutingScreen(sshClient: SshClient?) {
                     }
                 }
             }
-            if (activeCore != ProxyCore.MIHOMO) {
+            if (xraySubscription) {
+                Text("Серверами подписки управляет роутер: лучшие по скорости, выбор по задержке. Настройки и проверки — на вкладке «Серверы».")
+            }
+            if (activeCore != ProxyCore.MIHOMO && !xraySubscription) {
             Text("Балансировка", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
 
             Card(Modifier.fillMaxWidth()) {

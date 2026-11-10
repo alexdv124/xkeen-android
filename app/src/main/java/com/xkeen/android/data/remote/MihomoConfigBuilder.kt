@@ -228,6 +228,7 @@ internal class MihomoConfigBuilder {
 
         for (ruleElement in rules) {
             val rule = ruleElement.jsonObject
+            if (rule["balancerTag"]?.jsonPrimitive?.content == XraySubscriptionRemote.GEO_BALANCER) continue
             val target = mihomoTarget(rule)
             val network = rule.string("network").orEmpty()
             val port = rule.string("port").orEmpty()

@@ -35,6 +35,42 @@ MVVM + Clean Architecture. Kotlin, Jetpack Compose, Material Design 3.
 
 ## Critical implementation details
 
+### Router-owned Xray subscriptions (v1.9.0)
+`XraySubscriptionRemote` installs the packaged `xk-xray-sub.py` into
+`/opt/etc/xkeen-android/xray-subscription/subscription.py` only on connect/save. It checks curl
+and S05crond and installs Entware python3 if stdlib dependencies are unavailable. The phone
+submits a private JSON request and launches a detached Python child with an inherited flock;
+closing SSH does not cancel the job. Cron calls the same job for daily and half-hourly checks.
+Jobs refuse to apply when XKeen is not configured for running Xray. Local files are private,
+subscription URLs are passed through a private curl config rather than shell interpolation.
+
+The parser accepts VLESS lists or Base64, TCP/WS/gRPC/XHTTP with TLS/REALITY. It rejects unsupported
+formats or bad entries as a whole. Probe uses a temporary loopback HTTP listener per outbound
+in a separate Xray process; curl traverses the actual node for latency, down/up speed and GEO
+HTTP-code checks. Linux parent-death signaling prevents orphan probes after a worker dies.
+Score is down + 2*up, minimum 5 Mbit/s download, max(topN*2,15) candidates; select topN.
+GEO checks examine up to 30 candidates for up to 5 passing nodes, using the same endpoints and
+domains as Mihomo. Previously verified GEO nodes remain if no new ones pass. A healthy top1/2
+pool does not re-benchmark every 30 minutes. Changed source or a depleted pool triggers a bench.
+
+Owned servers and GEO balancer live in `08_xkeen_subscription.json`. Initial setup also updates
+05 routing and 07 observatory to use the subscription pool, preserving manual 04 outbounds.
+Later jobs replace only 08. Native leastPing chooses between best-speed candidates and between
+GEO-verified candidates. `XraySubscriptionRouting` keeps GEO on preset changes, except ALL_DIRECT,
+and explicit direct exceptions win. The Mihomo rule converter ignores Xray-owned GEO rules.
+Managed nodes are visible by provider names, but manual deletion/balancer selection excludes them.
+Disabling stops cron and retains the last valid config (deliberately different from Mihomo).
+
+The job snapshots all JSON files, validates staging with real Xray, compares snapshots again,
+backs up and rolls back on commit/restart failures. UI writes use the same flock plus a SHA-256
+compare. Manual server deletion recognizes external managed tags and delegates its commit to
+the same locked job when installed. Five recent config backups are retained. See Python tests
+for process detachment, rollback, partial writes, cron, status, parser and measurements.
+Gradle runs Python tests before Kotlin tests; release CI downloads pinned Xray 26.11.9 to run
+real transport tests over a local VLESS server. A native-only fixture explicitly allows localhost
+on its server because current Xray freedom blocks loopback targets by default; production rules
+are unaffected. No live user router is changed by development/build verification.
+
 ### Config comments and core detection (v1.8.3)
 `XrayJson` reads local Xray JSON with //, /* */ and # comments outside strings, preserving
 string escapes and line positions. It is shared by configuration reads, server deletion,

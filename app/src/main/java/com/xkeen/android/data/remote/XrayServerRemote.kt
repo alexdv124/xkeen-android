@@ -23,7 +23,8 @@ class XrayServerRemote(private val ssh: SshConnection) {
                 val observer = ssh.exec("test -f ${Paths.OBSERVATORY}")
                 check(observer.exitCode in 0..1) { "Не удалось прочитать конфиг observatory" }
                 if (observer.exitCode == 0) originals[Paths.OBSERVATORY] = ssh.readFile(Paths.OBSERVATORY)
-                val updated = XrayServerEditor().remove(originals, tags)
+                val managed = if (XrayConfigRemote(ssh).hasSubscriptionConfig()) ssh.readFile(XraySubscriptionRemote.CONFIG) else null
+                val updated = XrayServerEditor().remove(originals, tags, managed)
                 val id = UUID.randomUUID().toString()
                 val staged = "/opt/etc/xray/.android-delete-$id"
                 val backup = "${Paths.CONFIGS_DIR}/backups/delete-$id"
@@ -42,6 +43,17 @@ class XrayServerRemote(private val ssh: SshConnection) {
                 // Do not accidentally restart another core if it was changed outside this screen.
                 checked("grep -q '^name_client=\"xray\"' /opt/etc/init.d/S99xkeen")
                 withContext(NonCancellable) {
+                    if (ssh.exec("test -f '${XraySubscriptionRemote.SCRIPT}' && echo XK_SUB").stdout.trim() == "XK_SUB") {
+                        val expected = kotlinx.serialization.json.buildJsonObject {
+                            for ((path, content) in originals) put(path.substringAfterLast('/'), kotlinx.serialization.json.JsonPrimitive(sha256(content)))
+                            managed?.let { put(XraySubscriptionRemote.CONFIG.substringAfterLast('/'), kotlinx.serialization.json.JsonPrimitive(sha256(it))) }
+                        }
+                        val manifest = "$staged/manifest.txt"
+                        ssh.writeFileB64(manifest, expected.toString())
+                        val applied = ssh.exec("/opt/bin/python3 '${XraySubscriptionRemote.SCRIPT}' apply '$staged' '$manifest'", timeout = 180000)
+                        return@withContext if (applied.exitCode == 0 && applied.stdout.trim() == "OK") true to "Серверы удалены. Xray перезапущен."
+                            else false to applied.stdout.trim().ifBlank { "Не удалось подтвердить удаление. Проверьте состояние подписки" }
+                    }
                     try {
                         for (path in updated.keys) {
                             val file = path.substringAfterLast('/')
@@ -76,6 +88,8 @@ class XrayServerRemote(private val ssh: SshConnection) {
             }
         }
     }
+
+    private fun sha256(value: String): String = java.security.MessageDigest.getInstance("SHA-256").digest(value.toByteArray()).joinToString("") { "%02x".format(it) }
 
     private suspend fun restart(): Boolean {
         val result = ssh.exec("/opt/etc/init.d/S99xkeen restart 2>&1", timeout = 30000)

@@ -72,7 +72,8 @@ data class SubscriptionStatus(
  * fastest-responding servers and limits SUB-BEST to the top N. Nothing depends on the phone
  * after setup.
  */
-class SubscriptionRemote(private val ssh: SshConnection) {
+class SubscriptionRemote(private val ssh: SshConnection, private val core: com.xkeen.android.domain.model.ProxyCore = com.xkeen.android.domain.model.ProxyCore.MIHOMO) {
+    private val isXray get() = core == com.xkeen.android.domain.model.ProxyCore.XRAY
     private val json = Json { ignoreUnknownKeys = true }
 
     private companion object {
@@ -80,6 +81,7 @@ class SubscriptionRemote(private val ssh: SshConnection) {
     }
 
     suspend fun status(): SubscriptionStatus = withContext(Dispatchers.IO) {
+        if (isXray) return@withContext XraySubscriptionRemote(ssh).status()
         val path = RouterCommands(ssh).findMihomoConfigPath()
         val raw = if (path.isBlank()) "" else ssh.readFile(path)
         val editor = MihomoConfigEditor()
@@ -151,6 +153,7 @@ class SubscriptionRemote(private val ssh: SshConnection) {
 
     /** Installs the script, config changes and cron, then starts the first refresh in background. */
     suspend fun enable(url: String, settings: SubscriptionSettings): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+        if (isXray) return@withContext XraySubscriptionRemote(ssh).enable(url, settings)
         try {
             require(isValidSubscriptionUrl(url)) { "Ссылка подписки должна начинаться с http:// или https://" }
             val cmds = RouterCommands(ssh)
@@ -177,6 +180,7 @@ class SubscriptionRemote(private val ssh: SshConnection) {
      * (re-applying the subscription is idempotent and keeps the benchmark filters).
      */
     suspend fun updateSettings(settings: SubscriptionSettings): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+        if (isXray) return@withContext XraySubscriptionRemote(ssh).updateSettings(settings)
         try {
             val path = RouterCommands(ssh).findMihomoConfigPath()
             require(path.isNotBlank()) { "Конфиг Mihomo не найден" }
@@ -220,6 +224,7 @@ class SubscriptionRemote(private val ssh: SshConnection) {
     suspend fun rebenchNow(): Pair<Boolean, String> = start("bench", "Замеряю скорость серверов…")
 
     private suspend fun start(mode: String, message: String): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+        if (isXray) return@withContext XraySubscriptionRemote(ssh).start(mode)
         if (startInBackground(mode, 0)) true to message else false to "Замер уже выполняется"
     }
 

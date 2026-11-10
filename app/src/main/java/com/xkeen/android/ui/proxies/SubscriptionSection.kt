@@ -24,6 +24,7 @@ import java.util.Locale
 
 @Composable
 fun SubscriptionCard(
+    xray: Boolean = false,
     status: SubscriptionStatus?,
     busy: Boolean,
     onConnect: () -> Unit,
@@ -49,13 +50,16 @@ fun SubscriptionCard(
             when {
                 status == null -> Text("Проверяю…", style = MaterialTheme.typography.bodySmall)
                 !status.enabled -> {
+                    if (status.running) Text("Первое подключение выполняется на роутере…")
+                    if (status.lastError.isNotBlank()) Text(status.lastError, color = MaterialTheme.colorScheme.error)
+                    if (xray && status.geoGroup) Text("Автообновление отключено. Последние рабочие серверы сохранены.")
                     Text(
                         "Вставьте ссылку подписки провайдера. Роутер сам будет обновлять её раз в сутки, " +
                             "замерять скорость серверов и работать через ${SubscriptionSettings().topN} самых быстрых. " +
                             "Если провайдер сменит адреса, конфиг обновится автоматически.",
                         style = MaterialTheme.typography.bodySmall
                     )
-                    Button(onClick = onConnect, enabled = !busy) {
+                    Button(onClick = onConnect, enabled = !busy && !status.running) {
                         Icon(Icons.Default.Link, null, Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
                         Text("Подключить подписку")
@@ -129,7 +133,7 @@ fun SubscriptionCard(
                         Text(
                             when {
                                 ok.isNotEmpty() -> ok.joinToString(", ") { it.name }
-                                status.geoServers.isNotEmpty() -> "Ни один проверенный сервер не прошёл проверку, используются прежние"
+                                status.geoServers.isNotEmpty() -> if (xray) "Ни один проверенный сервер не прошёл проверку; обход геоблокировок не подтверждён" else "Ни один проверенный сервер не прошёл проверку, используются прежние"
                                 else -> "Проверка ещё не выполнялась"
                             },
                             style = MaterialTheme.typography.bodySmall,
@@ -149,7 +153,7 @@ fun SubscriptionCard(
                         }
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = onSettings, enabled = !busy, modifier = Modifier.weight(1f)) {
+                        OutlinedButton(onClick = onSettings, enabled = !busy && !status.running, modifier = Modifier.weight(1f)) {
                             Text("Настройки")
                         }
                         TextButton(onClick = onDisable, enabled = !busy && !status.running, modifier = Modifier.weight(1f)) {
@@ -165,6 +169,7 @@ fun SubscriptionCard(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SubscriptionDialog(
+    xray: Boolean = false,
     initialUrl: String,
     initialSettings: SubscriptionSettings,
     editing: Boolean,
@@ -184,6 +189,7 @@ fun SubscriptionDialog(
         title = { Text(if (editing) "Настройки подписки" else "Подключить подписку") },
         text = {
             Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (xray) Text("Для Xray: список VLESS-ссылок или Base64. Роутер будет сам обновлять подписку, замерять скорость и проверять геоблокировки. При необходимости приложение установит Python 3 через Entware. Серверы, добавленные вручную, сохранятся; основным пулом станет подписка.", style = MaterialTheme.typography.bodySmall)
                 OutlinedTextField(
                     value = url,
                     onValueChange = { url = it.trim() },

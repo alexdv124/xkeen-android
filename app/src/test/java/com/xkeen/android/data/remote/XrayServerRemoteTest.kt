@@ -91,6 +91,7 @@ private class FakeXrayRouter : SshConnection {
         fun result(code: Int = 0, output: String = "") = SshResult(output, "", code)
         val args = Regex("'([^']*)'").findAll(cmd).map { it.groupValues[1] }.toList()
         return when {
+            cmd.startsWith("test -s ") -> result(1)
             cmd.startsWith("test -f ") -> result(if (Paths.OBSERVATORY in files) 0 else 1)
             cmd.startsWith("mkdir -p") -> {
                 val (staged, backup) = args

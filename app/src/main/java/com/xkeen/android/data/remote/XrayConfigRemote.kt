@@ -14,6 +14,15 @@ import kotlinx.serialization.json.*
 
 class XrayConfigRemote(private val ssh: SshConnection) {
 
+    private val snapshots = mutableMapOf<String, String>()
+
+    suspend fun hasSubscriptionConfig(): Boolean = ssh.exec("test -s ${XraySubscriptionRemote.CONFIG} && echo XK_SUB").stdout.trim() == "XK_SUB"
+
+    private suspend fun writeConfig(path: String, content: String) {
+        XraySubscriptionRemote(ssh).writeConfig(path, content, snapshots[path])
+        snapshots[path] = content
+    }
+
     private val json = Json { ignoreUnknownKeys = true; prettyPrint = true }
 
     private suspend fun readConfig(path: String, optional: Boolean = false): JsonObject {
@@ -23,6 +32,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
             if (optional && e.reason == RemoteFileReadFailure.MISSING) return JsonObject(emptyMap())
             throw e
         }
+        snapshots[path] = raw
         if (raw.isBlank()) {
             if (optional) return JsonObject(emptyMap())
             throw IllegalStateException("Файл $path пуст. Проверьте конфигурацию Xray на роутере")
@@ -36,7 +46,8 @@ class XrayConfigRemote(private val ssh: SshConnection) {
 
     suspend fun getProxyList(): List<ProxyInfo> {
         val config = readConfig(Paths.OUTBOUNDS)
-        val outbounds = config["outbounds"]?.jsonArray ?: return emptyList()
+        val managed = if (hasSubscriptionConfig()) readConfig(XraySubscriptionRemote.CONFIG) else JsonObject(emptyMap())
+        val outbounds = config["outbounds"]?.jsonArray.orEmpty() + managed["outbounds"]?.jsonArray.orEmpty()
 
         return outbounds.mapNotNull { ob ->
             val obj = ob.jsonObject
@@ -51,6 +62,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
             val flow = user?.get("flow")?.jsonPrimitive?.content ?: ""
 
             ProxyInfo(
+                displayName = obj["remarks"]?.jsonPrimitive?.content.orEmpty(),
                 tag = tag,
                 address = vnext?.get("address")?.jsonPrimitive?.content ?: "",
                 port = vnext?.get("port")?.jsonPrimitive?.int ?: 443,
@@ -71,6 +83,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
             ?: return Pair(false, "No outbounds array")
 
         val tag = outbound["tag"]?.jsonPrimitive?.content ?: return Pair(false, "No tag")
+        require(!tag.startsWith(XraySubscriptionRemote.PREFIX)) { "Префикс proxy-sub- зарезервирован для подписки" }
         if (outbounds.any { it.jsonObject["tag"]?.jsonPrimitive?.content == tag }) {
             return Pair(false, "Tag $tag already exists")
         }
@@ -103,7 +116,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
         val content = Json { prettyPrint = true }.encodeToString(
             JsonObject.serializer(), JsonObject(config)
         )
-        ssh.writeFileB64(Paths.OUTBOUNDS, content)
+        writeConfig(Paths.OUTBOUNDS, content)
         return Pair(true, "OK")
     }
 
@@ -122,7 +135,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
         val content = Json { prettyPrint = true }.encodeToString(
             JsonObject.serializer(), JsonObject(config)
         )
-        ssh.writeFileB64(Paths.OUTBOUNDS, content)
+        writeConfig(Paths.OUTBOUNDS, content)
         return Pair(true, "OK")
     }
 
@@ -159,6 +172,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
                 lastRule["balancerTag"] = JsonPrimitive("proxy-balancer")
             }
             is RoutingMode.Manual -> {
+                require(!mode.tag.startsWith(XraySubscriptionRemote.PREFIX)) { "Серверы подписки выбираются автоматически по задержке" }
                 if (!mode.tag.startsWith("proxy-")) return Pair(false, "Invalid proxy tag")
                 lastRule.remove("balancerTag")
                 lastRule["outboundTag"] = JsonPrimitive(mode.tag)
@@ -172,7 +186,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
         val content = Json { prettyPrint = true }.encodeToString(
             JsonObject.serializer(), JsonObject(config)
         )
-        ssh.writeFileB64(Paths.ROUTING, content)
+        writeConfig(Paths.ROUTING, content)
         return Pair(true, "OK")
     }
 
@@ -242,7 +256,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
         val obsContent = Json { prettyPrint = true }.encodeToString(
             JsonObject.serializer(), observatory
         )
-        ssh.writeFileB64(Paths.OBSERVATORY, obsContent)
+        writeConfig(Paths.OBSERVATORY, obsContent)
 
         // 2. Add balancer to routing config
         val config = readConfig(Paths.ROUTING).toMutableMap()
@@ -296,7 +310,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
         val content = Json { prettyPrint = true }.encodeToString(
             JsonObject.serializer(), JsonObject(config)
         )
-        ssh.writeFileB64(Paths.ROUTING, content)
+        writeConfig(Paths.ROUTING, content)
         return Pair(true, "Failover enabled")
     }
 
@@ -304,12 +318,14 @@ class XrayConfigRemote(private val ssh: SshConnection) {
      * Add proxy tag to existing balancer selector.
      */
     suspend fun addToBalancer(tag: String): Pair<Boolean, String> {
+        if (hasSubscriptionConfig()) return true to "Сервер сохранён отдельно от подписки"
         val currentTags = getBalancerTags()
         if (tag in currentTags) return Pair(true, "Already in balancer")
         return setBalancerTags(currentTags + tag)
     }
 
     suspend fun setBalancerTags(tags: List<String>): Pair<Boolean, String> {
+        if (hasSubscriptionConfig()) return false to "Пулом серверов управляет подписка"
         if (tags.isEmpty()) return Pair(false, "At least one proxy must be enabled")
 
         val config = readConfig(Paths.ROUTING).toMutableMap()
@@ -337,7 +353,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
         val content = Json { prettyPrint = true }.encodeToString(
             JsonObject.serializer(), JsonObject(config)
         )
-        ssh.writeFileB64(Paths.ROUTING, content)
+        writeConfig(Paths.ROUTING, content)
         return Pair(true, "OK")
     }
 
@@ -459,6 +475,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
         val customRoutes = mutableListOf<CustomRoute>()
         for (rule in rules) {
             val obj = rule.jsonObject
+            if (obj["balancerTag"]?.jsonPrimitive?.content == XraySubscriptionRemote.GEO_BALANCER) continue
             val target = obj["outboundTag"]?.jsonPrimitive?.content
                 ?: if (obj.containsKey("balancerTag")) "proxy" else continue
             val routeTarget = if (target == "direct") "direct" else "proxy"
@@ -616,7 +633,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
     "loglevel": "warning"
   }
 }""".trimIndent()
-        ssh.writeFileB64("${Paths.CONFIGS_DIR}/01_log.json", logConfig)
+        writeConfig("${Paths.CONFIGS_DIR}/01_log.json", logConfig)
 
         // 2. Write 03_inbounds.json
         val inboundsConfig = """
@@ -663,7 +680,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
     }
   ]
 }""".trimIndent()
-        ssh.writeFileB64("${Paths.CONFIGS_DIR}/03_inbounds.json", inboundsConfig)
+        writeConfig("${Paths.CONFIGS_DIR}/03_inbounds.json", inboundsConfig)
 
         // 3. Write 04_outbounds.json
         // If any link declared TLS-fragment settings (fm=...), prepend a shared "fragment" freedom outbound
@@ -696,7 +713,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
             }
         }
         val outContent = Json { prettyPrint = true }.encodeToString(JsonObject.serializer(), outboundsObj)
-        ssh.writeFileB64(Paths.OUTBOUNDS, outContent)
+        writeConfig(Paths.OUTBOUNDS, outContent)
 
         // 4. Write 05_routing.json (standard preset)
         val inboundTags = buildJsonArray {
@@ -774,7 +791,7 @@ class XrayConfigRemote(private val ssh: SshConnection) {
             }
         }
         val routContent = Json { prettyPrint = true }.encodeToString(JsonObject.serializer(), routingObj)
-        ssh.writeFileB64(Paths.ROUTING, routContent)
+        writeConfig(Paths.ROUTING, routContent)
 
         // 5. Write 07_observatory.json (if 2+ servers)
         if (tags.size >= 2) {
@@ -1095,13 +1112,14 @@ class XrayConfigRemote(private val ssh: SshConnection) {
         }
         rules.add(catchAll)
 
-        routing["rules"] = JsonArray(rules)
+        routing["rules"] = JsonArray(if (hasSubscriptionConfig() && preset != RoutingPreset.ALL_DIRECT)
+            XraySubscriptionRouting.withGeo(rules) else rules)
         config["routing"] = JsonObject(routing)
 
         val content = Json { prettyPrint = true }.encodeToString(
             JsonObject.serializer(), JsonObject(config)
         )
-        ssh.writeFileB64(Paths.ROUTING, content)
+        writeConfig(Paths.ROUTING, content)
         return Pair(true, "Preset applied: ${preset.title}")
     }
 }

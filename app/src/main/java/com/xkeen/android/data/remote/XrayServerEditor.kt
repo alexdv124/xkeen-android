@@ -6,7 +6,7 @@ import kotlinx.serialization.json.*
 internal class XrayServerEditor {
     private val json = Json { prettyPrint = true }
 
-    fun remove(configs: Map<String, String>, tags: Set<String>): Map<String, String> {
+    fun remove(configs: Map<String, String>, tags: Set<String>, managedConfig: String? = null): Map<String, String> {
         val outConfig = XrayJson.parseObject(configs.getValue(Paths.OUTBOUNDS))
         val all = outConfig["outbounds"]?.jsonArray?.map { it.jsonObject }.orEmpty()
         fun tag(outbound: JsonObject) = outbound["tag"]?.jsonPrimitive?.content.orEmpty()
@@ -17,7 +17,9 @@ internal class XrayServerEditor {
         val fallback = (proxyTags - tags).firstOrNull()
         require(fallback != null) { "Оставьте хотя бы один сервер Xray" }
         val remaining = all.filter { tag(it) !in tags }
-        val remainingTags = remaining.map { tag(it) }
+        val managedTags = managedConfig?.let { XrayJson.parseObject(it)["outbounds"]?.jsonArray }
+            .orEmpty().mapNotNull { it.jsonObject["tag"]?.jsonPrimitive?.content }
+        val remainingTags = remaining.map { tag(it) } + managedTags
         remaining.forEach { outbound ->
             val proxy = outbound["proxySettings"]?.jsonObject?.get("tag")?.jsonPrimitive?.content
             val dialer = outbound["streamSettings"]?.jsonObject?.get("sockopt")?.jsonObject

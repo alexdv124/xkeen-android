@@ -89,7 +89,8 @@ data class ProxyInfo(
     val failed: Boolean = false,
     val requests: Int = 0,
     val selected: Boolean = false,
-    val delayMs: Int = 0
+    val delayMs: Int = 0,
+    val displayName: String = ""
 )
 
 sealed class RoutingMode {
